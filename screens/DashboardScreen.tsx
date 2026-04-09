@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, FlatList, Image, ActivityIndicator, StatusBar } from 'react-native';
+import DeviceInfo from 'react-native-device-info';
 import AuthService from '../services/AuthService';
 import DashboardService from '../services/DashboardService';
+import AppUsageService from '../services/AppUsageService';
 import DashboardModel from '../models/DashboardModel';
 
 const XR_LOGO = require('../assets/xr-store-logo.png');
@@ -27,16 +29,38 @@ export default function DashboardScreen({ user, onSelectApp, onOpenStore, onLogo
   const [batteryLevel, setBatteryLevel] = useState<number | string | null>(null);
   const [allApps, setAllApps] = useState<DashboardModel[]>([]);
   const [appsLoading, setAppsLoading] = useState<boolean>(true);
+  const [usageTimes, setUsageTimes] = useState<Record<string, string>>({});
 
   useEffect(() => {
     DashboardService.getApps()
-      .then((apps: DashboardModel[]) => setAllApps(apps))
+      .then((apps: DashboardModel[]) => {
+        setAllApps(apps);
+        fetchUsageTimes(apps);
+      })
       .catch(() => {})
       .finally(() => setAppsLoading(false));
   }, []);
 
+  const fetchUsageTimes = async (apps: DashboardModel[]) => {
+    const times: Record<string, string> = {};
+    await Promise.all(
+      apps.map(async (app) => {
+        const packageName = app.fileName.replace(/\.apk$/i, '');
+        try {
+          const stats = await AppUsageService.getAppUsage(packageName);
+          times[app.fileName] = stats.totalTimeFormatted;
+        } catch {
+          times[app.fileName] = '00:00';
+        }
+      })
+    );
+    setUsageTimes(times);
+  };
+
   useEffect(() => {
-    setBatteryLevel('N/A');
+    DeviceInfo.getBatteryLevel().then((level) => {
+      setBatteryLevel(level >= 0 ? Math.round(level * 100) : 'N/A');
+    }).catch(() => setBatteryLevel('N/A'));
   }, []);
 
   const handleLogout = async () => {
@@ -88,30 +112,18 @@ export default function DashboardScreen({ user, onSelectApp, onOpenStore, onLogo
           renderItem={({ item: app, index }) => {
             console.log(`[DashboardScreen] Rendering item ${index}:`, app.applicationName);
             return (
-            <View style={styles.appItem}>
+            <TouchableOpacity style={styles.appItem} onPress={() => onSelectApp(app)} activeOpacity={0.8}>
               {/* Thumbnail */}
               <View style={styles.appThumbnail}>
                 <Image source={{ uri: app.logoURL }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
               </View>
 
-              {/* Middle: name + version */}
-              <TouchableOpacity style={styles.appDetails} onPress={() => onSelectApp(app)}>
+              {/* Name + Time in App */}
+              <View style={styles.appDetails}>
                 <Text style={styles.appName}>{app.applicationName}</Text>
-                <View style={styles.versionRow}>
-                  <Text style={styles.appVersion}>Version {app.versionNumber}</Text>
-                </View>
-              </TouchableOpacity>
-
-              {/* Right: action buttons */}
-              <View style={styles.appActions}>
-                <TouchableOpacity style={styles.btnLaunch}>
-                  <Text style={styles.btnText}>Launch</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btnUninstall}>
-                  <Text style={styles.btnText}>Uninstall</Text>
-                </TouchableOpacity>
+                <Text style={styles.appTimeInApp}>Time in App: {usageTimes[app.fileName] ?? '00:00'}</Text>
               </View>
-            </View>
+            </TouchableOpacity>
             );
           }}
         />
@@ -126,6 +138,7 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
     paddingTop: 50,
     paddingHorizontal: 16,
+    paddingBottom: 24,
   },
   header: {
     flexDirection: 'row',
@@ -196,67 +209,36 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   appItem: {
-    backgroundColor: '#1c3a52',
-    borderRadius: 10,
+    backgroundColor: '#b0bece',
+    borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 14,
     overflow: 'hidden',
-    minHeight: 120,
+    minHeight: 90,
   },
   appThumbnail: {
-    width: 120,
-    height: 120,
-    backgroundColor: '#6e8aaa',
+    width: 80,
+    height: 80,
+    backgroundColor: '#8a9eb5',
+    borderRadius: 10,
+    margin: 10,
     overflow: 'hidden',
   },
   appDetails: {
     flex: 1,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingHorizontal: 10,
     justifyContent: 'center',
-    gap: 4,
+    gap: 8,
   },
   appName: {
-    color: TEXT_PRIMARY,
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  versionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  appVersion: {
-    color: TEXT_PRIMARY,
-    fontSize: 14,
-    opacity: 0.8,
-  },
-  appActions: {
-    justifyContent: 'center',
-    paddingVertical: 12,
-    paddingRight: 12,
-    paddingLeft: 6,
-    gap: 10,
-  },
-  btnLaunch: {
-    backgroundColor: '#4a8a3a',
-    borderRadius: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    minWidth: 110,
-    alignItems: 'center',
-  },
-  btnUninstall: {
-    backgroundColor: '#7a2a20',
-    borderRadius: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    minWidth: 110,
-    alignItems: 'center',
-  },
-  btnText: {
-    color: TEXT_PRIMARY,
-    fontSize: 16,
+    color: '#1a2d42',
+    fontSize: 18,
     fontWeight: '500',
+  },
+  appTimeInApp: {
+    color: '#1a2d42',
+    fontSize: 16,
+    fontWeight: '400',
   },
 });

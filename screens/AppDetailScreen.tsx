@@ -1,6 +1,7 @@
-import React from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Image, StatusBar } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Image, StatusBar, ActivityIndicator } from 'react-native';
 import DashboardModel from '../models/DashboardModel';
+import AppUsageService from '../services/AppUsageService';
 
 const XR_LOGO = require('../assets/xr-store-logo.png');
 
@@ -9,6 +10,8 @@ const CARD = '#1c2e45';
 const TEXT_PRIMARY = '#cce0f5';
 const DIVIDER = '#3a5a7a';
 
+type InstallState = 'loading' | 'not_installed' | 'installed' | 'update_available';
+
 type Props = {
   app: DashboardModel;
   onBack: () => void;
@@ -16,6 +19,77 @@ type Props = {
 };
 
 export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
+  const [installState, setInstallState] = useState<InstallState>('loading');
+  const packageName = app.fileName.replace(/\.apk$/i, '');
+
+  const checkInstallState = useCallback(async () => {
+    setInstallState('loading');
+    try {
+      const installedVersion = await AppUsageService.getInstalledVersion(packageName);
+      if (installedVersion === null) {
+        setInstallState('not_installed');
+      } else if (installedVersion !== app.versionNumber) {
+        setInstallState('update_available');
+      } else {
+        setInstallState('installed');
+      }
+    } catch {
+      setInstallState('not_installed');
+    }
+  }, [packageName, app.versionNumber]);
+
+  useEffect(() => {
+    checkInstallState();
+  }, [checkInstallState]);
+
+  const handleLaunch = async () => {
+    await AppUsageService.launchApp(packageName);
+  };
+
+  const handleUninstall = async () => {
+    await AppUsageService.uninstallApp(packageName);
+    // Re-check state after returning from uninstall dialog
+    setTimeout(checkInstallState, 1000);
+  };
+
+  const renderButtons = () => {
+    if (installState === 'loading') {
+      return <ActivityIndicator color={TEXT_PRIMARY} style={{ marginBottom: 24 }} />;
+    }
+    if (installState === 'not_installed') {
+      return (
+        <View style={styles.buttonRow}>
+          <TouchableOpacity style={styles.installButton}>
+            <Text style={styles.buttonText}>Install</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    if (installState === 'update_available') {
+      return (
+        <View style={styles.buttonRow}>
+          <TouchableOpacity style={styles.updateButton}>
+            <Text style={styles.buttonText}>Update</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.uninstallButton} onPress={handleUninstall}>
+            <Text style={styles.buttonText}>Uninstall</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    // installed
+    return (
+      <View style={styles.buttonRow}>
+        <TouchableOpacity style={styles.launchButton} onPress={handleLaunch}>
+          <Text style={styles.buttonText}>Launch</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.uninstallButton} onPress={handleUninstall}>
+          <Text style={styles.buttonText}>Uninstall</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={BG} />
@@ -31,7 +105,7 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
       </View>
 
       {/* Main Card */}
-      <ScrollView style={styles.card} contentContainerStyle={{ padding: 16 }} showsVerticalScrollIndicator={false}>
+      <ScrollView style={styles.card} contentContainerStyle={{ padding: 16, flexGrow: 1 }} showsVerticalScrollIndicator={false}>
 
         {/* Banner Image */}
         <Image source={{ uri: app.bannerURL }} style={styles.bannerImage} resizeMode="cover" />
@@ -43,14 +117,7 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
         <Text style={styles.meta}>Version {app.versionNumber}  ·  {app.fileSize}</Text>
 
         {/* Action Buttons */}
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.launchButton}>
-            <Text style={styles.launchButtonText}>Launch</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.uninstallButton}>
-            <Text style={styles.uninstallButtonText}>Uninstall</Text>
-          </TouchableOpacity>
-        </View>
+        {renderButtons()}
 
         {/* Summary */}
         <Text style={styles.sectionTitle}>Summary</Text>
@@ -73,6 +140,7 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
     paddingTop: 50,
     paddingHorizontal: 16,
+    paddingBottom: 24,
   },
   header: {
     flexDirection: 'row',
@@ -123,28 +191,35 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 24,
   },
-  launchButton: {
-    backgroundColor: '#4a8a3a',
+  installButton: {
+    backgroundColor: '#2a6aad',
     borderRadius: 8,
-    paddingHorizontal: 16,
     paddingVertical: 10,
     flex: 1,
     alignItems: 'center',
   },
-  launchButtonText: {
-    color: TEXT_PRIMARY,
-    fontSize: 15,
-    fontWeight: '500',
+  launchButton: {
+    backgroundColor: '#4a8a3a',
+    borderRadius: 8,
+    paddingVertical: 10,
+    flex: 1,
+    alignItems: 'center',
+  },
+  updateButton: {
+    backgroundColor: '#a06020',
+    borderRadius: 8,
+    paddingVertical: 10,
+    flex: 1,
+    alignItems: 'center',
   },
   uninstallButton: {
     backgroundColor: '#7a2a20',
     borderRadius: 8,
-    paddingHorizontal: 20,
     paddingVertical: 10,
     flex: 1,
     alignItems: 'center',
   },
-  uninstallButtonText: {
+  buttonText: {
     color: TEXT_PRIMARY,
     fontSize: 15,
     fontWeight: '500',
