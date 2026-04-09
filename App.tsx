@@ -1,45 +1,72 @@
-/**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
- */
+import React, { useState } from 'react';
+import { View, ActivityIndicator } from 'react-native';
+import LoginScreen from './screens/LoginScreen';
+import DashboardScreen from './screens/DashboardScreen';
+import AppDetailScreen from './screens/AppDetailScreen';
+import StoreScreen from './screens/StoreScreen';
+import DashboardModel from './models/DashboardModel';
 
-import { NewAppScreen } from '@react-native/new-app-screen';
-import { StatusBar, StyleSheet, useColorScheme, View } from 'react-native';
-import {
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+type Screen = 'login' | 'dashboard' | 'store' | 'detail';
 
-function App() {
-  const isDarkMode = useColorScheme() === 'dark';
+type User = {
+  sub: string;
+  name: string;
+  given_name?: string;
+  family_name?: string;
+  email: string;
+  preferred_username: string;
+  roles: string[];
+};
 
-  return (
-    <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <AppContent />
-    </SafeAreaProvider>
-  );
-}
+export default function App() {
+  const [screen, setScreen] = useState<Screen>('login');
+  const [selectedApp, setSelectedApp] = useState<DashboardModel | null>(null);
+  const [user, setUser] = useState<User | null>(null);
 
-function AppContent() {
-  const safeAreaInsets = useSafeAreaInsets();
+  const handleLogin = (userInfo: User) => {
+    setUser(userInfo);
+    setScreen('dashboard');
+  };
 
-  return (
-    <View style={styles.container}>
-      <NewAppScreen
-        templateFileName="App.tsx"
-        safeAreaInsets={safeAreaInsets}
+  const handleLogout = () => {
+    setUser(null);
+    setScreen('login');
+  };
+
+  const handleSelectApp = (app: DashboardModel) => {
+    setSelectedApp(app);
+    setScreen('detail');
+  };
+
+  if (screen === 'login') {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  if (screen === 'detail' && selectedApp) {
+    return (
+      <AppDetailScreen
+        app={selectedApp}
+        onBack={() => setScreen('dashboard')}
+        onOpenStore={() => setScreen('store')}
       />
-    </View>
+    );
+  }
+
+  if (screen === 'store') {
+    return (
+      <StoreScreen
+        onBack={() => setScreen('dashboard')}
+        onSelectApp={handleSelectApp}
+      />
+    );
+  }
+
+  return (
+    <DashboardScreen
+      user={user!}
+      onSelectApp={handleSelectApp}
+      onOpenStore={() => setScreen('store')}
+      onLogout={handleLogout}
+    />
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-});
-
-export default App;
