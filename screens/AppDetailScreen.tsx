@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Image, StatusBar, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Image, StatusBar, ActivityIndicator, DeviceEventEmitter, Alert } from 'react-native';
 import DashboardModel from '../models/DashboardModel';
 import AppUsageService from '../services/AppUsageService';
 
@@ -20,7 +20,8 @@ type Props = {
 
 export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
   const [installState, setInstallState] = useState<InstallState>('loading');
-  const packageName = app.fileName.replace(/\.apk$/i, '');
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const packageName = app.fileName.replace(/\.(apk|zip)$/i, '');
 
   const checkInstallState = useCallback(async () => {
     setInstallState('loading');
@@ -42,6 +43,25 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
     checkInstallState();
   }, [checkInstallState]);
 
+  const handleInstall = async () => {
+    console.log('[Install] Starting download for:', packageName, 'url:', app.zipURL);
+    setDownloadProgress(0);
+    const sub = DeviceEventEmitter.addListener('downloadProgress', (e: { progress: number }) => {
+      setDownloadProgress(e.progress);
+    });
+    try {
+      const apkPath = await AppUsageService.downloadAndInstall(app.zipURL, packageName);
+      console.log('[Install] APK saved to:', apkPath);
+    } catch (e: any) {
+      console.log('[Install] Error code:', (e as any)?.code, 'message:', e?.message, 'full:', JSON.stringify(e));
+      Alert.alert('Install Failed', e?.message ?? 'Unknown error');
+    } finally {
+      sub.remove();
+      setDownloadProgress(null);
+      setTimeout(checkInstallState, 1500);
+    }
+  };
+
   const handleLaunch = async () => {
     await AppUsageService.launchApp(packageName);
   };
@@ -58,22 +78,46 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
     }
     if (installState === 'not_installed') {
       return (
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.installButton}>
-            <Text style={styles.buttonText}>Install</Text>
+        <View style={styles.buttonCol}>
+          {downloadProgress !== null && (
+            <View style={styles.progressBarTrack}>
+              <View style={[styles.progressBarFill, { width: `${downloadProgress}%` }]} />
+              <Text style={styles.progressText}>{downloadProgress}%</Text>
+            </View>
+          )}
+          <TouchableOpacity
+            style={[styles.installButton, downloadProgress !== null && styles.buttonDisabled]}
+            onPress={handleInstall}
+            disabled={downloadProgress !== null}>
+            <Text style={styles.buttonText}>
+              {downloadProgress !== null ? 'Installing…' : 'Install'}
+            </Text>
           </TouchableOpacity>
         </View>
       );
     }
     if (installState === 'update_available') {
       return (
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.updateButton}>
-            <Text style={styles.buttonText}>Update</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.uninstallButton} onPress={handleUninstall}>
-            <Text style={styles.buttonText}>Uninstall</Text>
-          </TouchableOpacity>
+        <View style={styles.buttonCol}>
+          {downloadProgress !== null && (
+            <View style={styles.progressBarTrack}>
+              <View style={[styles.progressBarFill, { width: `${downloadProgress}%` }]} />
+              <Text style={styles.progressText}>{downloadProgress}%</Text>
+            </View>
+          )}
+          <View style={styles.buttonRow}>
+            <TouchableOpacity
+              style={[styles.updateButton, downloadProgress !== null && styles.buttonDisabled]}
+              onPress={handleInstall}
+              disabled={downloadProgress !== null}>
+              <Text style={styles.buttonText}>
+                {downloadProgress !== null ? 'Updating…' : 'Update'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.uninstallButton} onPress={handleUninstall}>
+              <Text style={styles.buttonText}>Uninstall</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       );
     }
@@ -186,10 +230,37 @@ const styles = StyleSheet.create({
     opacity: 0.7,
     marginBottom: 16,
   },
+  buttonCol: {
+    marginBottom: 24,
+    gap: 10,
+  },
   buttonRow: {
     flexDirection: 'row',
     gap: 12,
-    marginBottom: 24,
+  },
+  progressBarTrack: {
+    height: 20,
+    backgroundColor: '#1a2d42',
+    borderRadius: 10,
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  progressBarFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#2a6aad',
+    borderRadius: 10,
+  },
+  progressText: {
+    color: TEXT_PRIMARY,
+    fontSize: 12,
+    textAlign: 'center',
+    fontWeight: '500',
+  },
+  buttonDisabled: {
+    opacity: 0.5,
   },
   installButton: {
     backgroundColor: '#2a6aad',

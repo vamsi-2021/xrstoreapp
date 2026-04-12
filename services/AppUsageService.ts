@@ -37,6 +37,11 @@ const AppUsageService = {
     if (!isAvailable) return;
     return AppUsageModule.uninstallApp(packageName);
   },
+
+  async downloadAndInstall(zipUrl: string, fileName: string): Promise<void> {
+    if (!isAvailable) return;
+    return AppUsageModule.downloadAndInstall(zipUrl, fileName);
+  },
 };
 
 export default AppUsageService;
