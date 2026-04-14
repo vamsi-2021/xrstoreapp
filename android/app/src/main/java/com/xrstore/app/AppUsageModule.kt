@@ -9,8 +9,6 @@ import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.facebook.react.bridge.*
-import com.facebook.react.modules.core.DeviceEventManagerModule
-import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -130,104 +128,83 @@ class AppUsageModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Downloads a ZIP from zipUrl, extracts the first APK inside, and triggers the system install dialog.
-     * Emits "downloadProgress" events with { progress: 0-100 } during download.
+     * Downloads the ZIP from zipUrl, extracts the APK matching fileName, and triggers installation.
      */
     @ReactMethod
-    fun downloadAndInstall(zipUrl: String, fileName: String, promise: Promise) {
+    fun installApp(zipUrl: String, fileName: String, promise: Promise) {
         Thread {
-            val cacheDir = reactApplicationContext.cacheDir
-            val zipFile = File(cacheDir, "$fileName.zip")
-            val apkFile = File(cacheDir, "$fileName.apk")
-            android.util.Log.d("AppUsageModule", "[Install] downloadAndInstall called: fileName=$fileName")
-            android.util.Log.d("AppUsageModule", "[Install] zipFile path: ${zipFile.absolutePath}")
-            android.util.Log.d("AppUsageModule", "[Install] apkFile path: ${apkFile.absolutePath}")
             try {
-                // Download ZIP
-                android.util.Log.d("AppUsageModule", "[Install] Connecting to URL: $zipUrl")
+                android.util.Log.d("XRInstall", "installApp called: zipUrl=$zipUrl fileName=$fileName")
+
+                val cacheDir = File(reactApplicationContext.cacheDir, "apk_installs")
+                cacheDir.mkdirs()
+                android.util.Log.d("XRInstall", "Cache dir: ${cacheDir.absolutePath}")
+
+                val zipFile = File(cacheDir, "temp.zip")
+                val apkFile = File(cacheDir, fileName.removeSuffix(".zip") + ".apk")
+                android.util.Log.d("XRInstall", "APK target path: ${apkFile.absolutePath}")
+
+                // Download the ZIP
+                android.util.Log.d("XRInstall", "Starting download...")
                 val connection = URL(zipUrl).openConnection() as HttpURLConnection
+                connection.connectTimeout = 30_000
+                connection.readTimeout = 120_000
                 connection.connect()
-                val statusCode = connection.responseCode
-                android.util.Log.d("AppUsageModule", "[Install] HTTP status: $statusCode")
-                if (statusCode !in 200..299) {
-                    promise.reject("DOWNLOAD_ERROR", "Server returned HTTP $statusCode")
-                    return@Thread
+                android.util.Log.d("XRInstall", "HTTP response code: ${connection.responseCode}")
+                FileOutputStream(zipFile).use { out ->
+                    connection.inputStream.use { it.copyTo(out) }
                 }
-                val totalBytes = connection.contentLength.toLong()
-                android.util.Log.d("AppUsageModule", "[Install] Total bytes to download: $totalBytes")
-                BufferedInputStream(connection.inputStream).use { input ->
-                    FileOutputStream(zipFile).use { output ->
-                        val buffer = ByteArray(8192)
-                        var downloaded = 0L
-                        var lastReported = -1
-                        var bytesRead: Int
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            output.write(buffer, 0, bytesRead)
-                            downloaded += bytesRead
-                            if (totalBytes > 0) {
-                                val progress = (downloaded * 100 / totalBytes).toInt()
-                                if (progress != lastReported) {
-                                    lastReported = progress
-                                    val params = Arguments.createMap()
-                                    params.putInt("progress", progress)
-                                    reactApplicationContext
-                                        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                                        .emit("downloadProgress", params)
-                                }
-                            }
-                        }
-                    }
-                }
+                connection.disconnect()
+                android.util.Log.d("XRInstall", "Download complete. ZIP size: ${zipFile.length()} bytes")
 
-                android.util.Log.d("AppUsageModule", "[Install] Download complete, zip size: ${zipFile.length()} bytes")
-
-                // Unzip — extract first .apk entry (case-insensitive)
-                android.util.Log.d("AppUsageModule", "[Install] Starting unzip...")
-                var found = false
-                val entryNames = mutableListOf<String>()
-                ZipInputStream(FileInputStream(zipFile)).use { zis ->
-                    var entry = zis.nextEntry
+                // Extract APK from ZIP
+                android.util.Log.d("XRInstall", "Extracting APK from ZIP...")
+                var extracted = false
+                ZipInputStream(FileInputStream(zipFile)).use { zip ->
+                    var entry = zip.nextEntry
                     while (entry != null) {
-                        entryNames.add(entry.name)
-                        android.util.Log.d("AppUsageModule", "[Install] ZIP entry: ${entry.name} (dir=${entry.isDirectory})")
-                        if (!entry.isDirectory && entry.name.lowercase().endsWith(".apk")) {
-                            android.util.Log.d("AppUsageModule", "[Install] Found APK entry: ${entry.name}, extracting...")
-                            FileOutputStream(apkFile).use { fos -> zis.copyTo(fos) }
-                            found = true
+                        android.util.Log.d("XRInstall", "ZIP entry: ${entry.name}")
+                        if (!entry.isDirectory && entry.name.endsWith(".apk")) {
+                            android.util.Log.d("XRInstall", "Found APK entry: ${entry.name}")
+                            FileOutputStream(apkFile).use { out -> zip.copyTo(out) }
+                            extracted = true
                             break
                         }
-                        entry = zis.nextEntry
+                        entry = zip.nextEntry
                     }
                 }
                 zipFile.delete()
-                android.util.Log.d("AppUsageModule", "[Install] All ZIP entries: ${entryNames.joinToString(", ")}")
+                android.util.Log.d("XRInstall", "Extraction done. extracted=$extracted APK size: ${apkFile.length()} bytes")
 
-                if (!found) {
-                    android.util.Log.e("AppUsageModule", "[Install] FAILED — no APK in ZIP. Entries: ${entryNames.joinToString(", ")}")
-                    promise.reject("UNZIP_ERROR", "No APK found. ZIP entries: ${entryNames.joinToString(", ")}")
+                if (!extracted) {
+                    android.util.Log.e("XRInstall", "APK not found in ZIP")
+                    promise.reject("INSTALL_ERROR", "APK not found in ZIP")
                     return@Thread
                 }
 
-                android.util.Log.d("AppUsageModule", "[Install] APK extracted to: ${apkFile.absolutePath} (${apkFile.length()} bytes)")
+                // Read package name from APK
+                val pkgInfo = reactApplicationContext.packageManager
+                    .getPackageArchiveInfo(apkFile.absolutePath, 0)
+                val extractedPackageName = pkgInfo?.packageName ?: ""
+                android.util.Log.d("XRInstall", "Package name from APK: $extractedPackageName")
 
-                // Trigger install dialog
-                val apkUri = FileProvider.getUriForFile(
+                // Trigger system installer
+                val uri = FileProvider.getUriForFile(
                     reactApplicationContext,
-                    "${reactApplicationContext.packageName}.fileprovider",
+                    "${reactApplicationContext.packageName}.provider",
                     apkFile
                 )
-                android.util.Log.d("AppUsageModule", "[Install] Launching install dialog for URI: $apkUri")
-                val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                    setDataAndType(apkUri, "application/vnd.android.package-archive")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                android.util.Log.d("XRInstall", "FileProvider URI: $uri")
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 reactApplicationContext.startActivity(intent)
-                android.util.Log.d("AppUsageModule", "[Install] Install dialog launched successfully")
-                promise.resolve(apkFile.absolutePath)
+                android.util.Log.d("XRInstall", "Install intent launched successfully")
+                promise.resolve(extractedPackageName)
             } catch (e: Exception) {
-                android.util.Log.e("AppUsageModule", "[Install] Exception: ${e.javaClass.simpleName}: ${e.message}", e)
-                zipFile.delete()
+                android.util.Log.e("XRInstall", "installApp error: ${e.message}", e)
                 promise.reject("INSTALL_ERROR", e.message ?: "Unknown error")
             }
         }.start()

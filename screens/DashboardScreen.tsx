@@ -58,9 +58,17 @@ export default function DashboardScreen({ user, onSelectApp, onOpenStore, onLogo
   };
 
   useEffect(() => {
-    DeviceInfo.getBatteryLevel().then((level) => {
-      setBatteryLevel(level >= 0 ? Math.round(level * 100) : 'N/A');
-    }).catch(() => setBatteryLevel('N/A'));
+    const timeout = setTimeout(() => setBatteryLevel('N/A'), 3000);
+    DeviceInfo.getBatteryLevel()
+      .then((level) => {
+        clearTimeout(timeout);
+        setBatteryLevel(level >= 0 ? Math.round(level * 100) : 'N/A');
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        setBatteryLevel('N/A');
+      });
+    return () => clearTimeout(timeout);
   }, []);
 
   const handleLogout = async () => {
