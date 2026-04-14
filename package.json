@@ -7,14 +7,18 @@
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
-    "test": "jest"
+    "test": "jest",
+    "windows": "npx @react-native-community/cli run-windows",
+    "test:windows": "jest --config jest.config.windows.js"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "^3.0.2",
     "@react-native/new-app-screen": "0.84.1",
     "react": "19.2.3",
     "react-native": "0.84.1",
     "react-native-device-info": "^15.0.2",
-    "react-native-safe-area-context": "^5.5.2"
+    "react-native-safe-area-context": "^5.5.2",
+    "react-native-windows": "^0.84.0-preview.2"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
@@ -27,6 +31,7 @@
     "@react-native/eslint-config": "0.84.1",
     "@react-native/metro-config": "0.84.1",
     "@react-native/typescript-config": "0.84.1",
+    "@rnx-kit/jest-preset": "^0.3.1",
     "@types/jest": "^29.5.13",
     "@types/react": "^19.2.0",
     "@types/react-test-renderer": "^19.1.0",
@@ -38,5 +43,12 @@
   },
   "engines": {
     "node": ">= 22.11.0"
+  },
+  "react-native-windows": {
+    "init-windows": {
+      "name": "ComXrstoreApp",
+      "namespace": "ComXrstoreApp",
+      "template": "cpp-app"
+    }
   }
 }

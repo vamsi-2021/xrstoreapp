@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Image, StatusBar, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Image, StatusBar, ActivityIndicator, Platform } from 'react-native';
 import DashboardModel from '../models/DashboardModel';
 import AppUsageService from '../services/AppUsageService';
 
 const XR_LOGO = require('../assets/xr-store-logo.png');
+
+// Persists install state within the app session on Windows (no native API to query)
+const windowsInstalledApps = new Map<string, boolean>();
 
 const BG = '#0d1b2a';
 const CARD = '#1c2e45';
 const TEXT_PRIMARY = '#cce0f5';
 const DIVIDER = '#3a5a7a';
 
-type InstallState = 'loading' | 'not_installed' | 'installed' | 'update_available';
+type InstallState = 'loading' | 'not_installed' | 'installed' | 'update_available' | 'installing';
 
 type Props = {
   app: DashboardModel;
@@ -20,12 +23,21 @@ type Props = {
 
 export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
   const [installState, setInstallState] = useState<InstallState>('loading');
-  const packageName = app.fileName.replace(/\.apk$/i, '');
+  const [packageName, setPackageName] = useState<string>('');
 
-  const checkInstallState = useCallback(async () => {
+  const checkInstallState = useCallback(async (pkgName: string) => {
+    if (Platform.OS === 'windows') {
+      const installed = windowsInstalledApps.get(app.fileName) ?? false;
+      setInstallState(installed ? 'installed' : 'not_installed');
+      return;
+    }
+    if (!pkgName) {
+      setInstallState('not_installed');
+      return;
+    }
     setInstallState('loading');
     try {
-      const installedVersion = await AppUsageService.getInstalledVersion(packageName);
+      const installedVersion = await AppUsageService.getInstalledVersion(pkgName);
       if (installedVersion === null) {
         setInstallState('not_installed');
       } else if (installedVersion !== app.versionNumber) {
@@ -36,11 +48,45 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
     } catch {
       setInstallState('not_installed');
     }
-  }, [packageName, app.versionNumber]);
+  }, [app.versionNumber]);
 
   useEffect(() => {
-    checkInstallState();
-  }, [checkInstallState]);
+    checkInstallState(packageName);
+  }, [checkInstallState, packageName]);
+
+  const handleInstall = async () => {
+    console.log('[Install] Button tapped');
+    console.log('[Install] zipURL:', app.zipURL);
+    console.log('[Install] fileName:', app.fileName);
+    setInstallState('installing');
+    try {
+      console.log('[Install] Starting download from:', app.zipURL);
+      const resolvedPackageName = await AppUsageService.installApp(app.zipURL, app.fileName);
+      console.log('[Install] Download & extraction complete');
+      if (Platform.OS === 'windows') {
+        // Parse paths returned from native module: "downloadPath=...;installPath=..."
+        if (resolvedPackageName) {
+          const parts: Record<string, string> = {};
+          resolvedPackageName.split(';').forEach(p => {
+            const idx = p.indexOf('=');
+            if (idx > 0) parts[p.slice(0, idx)] = p.slice(idx + 1);
+          });
+          console.log('[Install] Download path:', parts.downloadPath);
+          console.log('[Install] Install path: ', parts.installPath);
+        }
+        windowsInstalledApps.set(app.fileName, true);
+        setInstallState('installed');
+        return;
+      }
+      if (resolvedPackageName) {
+        setPackageName(resolvedPackageName);
+      }
+      setTimeout(() => checkInstallState(resolvedPackageName || packageName), 2000);
+    } catch (e) {
+      console.log('[Install] installApp error:', e);
+      checkInstallState(packageName);
+    }
+  };
 
   const handleLaunch = async () => {
     await AppUsageService.launchApp(packageName);
@@ -48,18 +94,25 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
 
   const handleUninstall = async () => {
     await AppUsageService.uninstallApp(packageName);
-    // Re-check state after returning from uninstall dialog
-    setTimeout(checkInstallState, 1000);
+    setTimeout(() => checkInstallState(packageName), 1000);
   };
 
   const renderButtons = () => {
     if (installState === 'loading') {
       return <ActivityIndicator color={TEXT_PRIMARY} style={{ marginBottom: 24 }} />;
     }
+    if (installState === 'installing') {
+      return (
+        <View style={styles.buttonRow}>
+          <ActivityIndicator color={TEXT_PRIMARY} style={{ marginBottom: 24 }} />
+          <Text style={[styles.buttonText, { marginBottom: 24, marginLeft: 8 }]}>Installing...</Text>
+        </View>
+      );
+    }
     if (installState === 'not_installed') {
       return (
         <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.installButton}>
+          <TouchableOpacity style={styles.installButton} onPress={handleInstall}>
             <Text style={styles.buttonText}>Install</Text>
           </TouchableOpacity>
         </View>
@@ -68,7 +121,7 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
     if (installState === 'update_available') {
       return (
         <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.updateButton}>
+          <TouchableOpacity style={styles.updateButton} onPress={handleInstall}>
             <Text style={styles.buttonText}>Update</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.uninstallButton} onPress={handleUninstall}>
