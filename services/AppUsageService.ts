@@ -1,8 +1,9 @@
 import { NativeModules, Platform } from 'react-native';
 
-const { AppUsageModule } = NativeModules;
+const { AppUsageModule, InstallModule } = NativeModules;
 
 const isAvailable = Platform.OS === 'android' && AppUsageModule != null;
+const isWindows = Platform.OS === 'windows';
 
 export type AppUsageStats = {
   packageName: string;
@@ -31,6 +32,22 @@ const AppUsageService = {
   async launchApp(packageName: string): Promise<void> {
     if (!isAvailable) return;
     return AppUsageModule.launchApp(packageName);
+  },
+
+  async installApp(zipUrl: string, fileName: string): Promise<string> {
+    console.log('[AppUsageService] Platform.OS:', Platform.OS);
+    console.log('[AppUsageService] isWindows:', isWindows);
+    console.log('[AppUsageService] InstallModule:', InstallModule);
+    console.log('[AppUsageService] isAvailable:', isAvailable);
+    if (isWindows && InstallModule) {
+      console.log('[AppUsageService] Using InstallModule (Windows)');
+      return InstallModule.installApp(zipUrl, fileName);
+    }
+    if (isWindows && !InstallModule) {
+      console.log('[AppUsageService] ERROR: InstallModule is null on Windows - module not registered');
+    }
+    if (!isAvailable) return '';
+    return AppUsageModule.installApp(zipUrl, fileName);
   },
 
   async uninstallApp(packageName: string): Promise<void> {
