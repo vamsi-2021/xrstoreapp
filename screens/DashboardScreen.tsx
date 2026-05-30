@@ -179,6 +179,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   userInfo: {
+    flex: 1,
     gap: 6,
   },
   userName: {

@@ -171,7 +171,8 @@ const styles = StyleSheet.create({
     color: TEXT,
     fontSize: 16,
     fontWeight: '600',
-    alignSelf: 'center',
+    width: '100%',
+    textAlign: 'center',
     marginBottom: 8,
   },
   input: {
@@ -213,8 +214,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.5,
     shadowRadius: 6,
     elevation: 4,
-    minWidth: 120,
+    width: '60%',
     alignItems: 'center',
+    alignSelf: 'center',
   },
   buttonDisabled: {
     opacity: 0.6,
