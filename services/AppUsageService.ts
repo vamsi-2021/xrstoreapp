@@ -29,9 +29,13 @@ const AppUsageService = {
     return AppUsageModule.getInstalledVersion(packageName);
   },
 
-  async launchApp(packageName: string): Promise<void> {
+  async launchApp(packageNameOrPath: string): Promise<void> {
+    if (isWindows && InstallModule) {
+      await InstallModule.launchApp(packageNameOrPath);
+      return;
+    }
     if (!isAvailable) return;
-    return AppUsageModule.launchApp(packageName);
+    return AppUsageModule.launchApp(packageNameOrPath);
   },
 
   async installApp(zipUrl: string, fileName: string): Promise<string> {
@@ -50,9 +54,13 @@ const AppUsageService = {
     return AppUsageModule.installApp(zipUrl, fileName);
   },
 
-  async uninstallApp(packageName: string): Promise<void> {
+  async uninstallApp(packageNameOrPath: string): Promise<void> {
+    if (isWindows && InstallModule) {
+      await InstallModule.uninstallApp(packageNameOrPath);
+      return;
+    }
     if (!isAvailable) return;
-    return AppUsageModule.uninstallApp(packageName);
+    return AppUsageModule.uninstallApp(packageNameOrPath);
   },
 
   async downloadAndInstall(zipUrl: string, fileName: string): Promise<void> {

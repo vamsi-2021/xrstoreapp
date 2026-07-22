@@ -35,6 +35,25 @@ local.properties
 !debug.keystore
 .kotlin/
 
+# Windows / react-native-windows
+#
+windows/**/AppPackages/
+windows/**/BundleArtifacts/
+windows/**/bin/
+windows/**/obj/
+windows/**/x64/
+windows/**/x86/
+windows/**/ARM64/
+windows/**/.vs/
+windows/**/MSBuild.ProcessorArchitecture.targets.log
+*.appx
+*.appxbundle
+*.appxupload
+*.appxsym
+
+# Build outputs for distribution
+dist/
+
 # node.js
 #
 node_modules/

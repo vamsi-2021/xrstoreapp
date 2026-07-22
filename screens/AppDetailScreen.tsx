@@ -5,8 +5,8 @@ import AppUsageService from '../services/AppUsageService';
 
 const XR_LOGO = require('../assets/xr-store-logo.png');
 
-// Persists install state within the app session on Windows (no native API to query)
-const windowsInstalledApps = new Map<string, boolean>();
+// Persists installed exe paths within the app session on Windows (no native API to query)
+const windowsInstalledApps = new Map<string, string>();
 
 const BG = '#0d1b2a';
 const CARD = '#1c2e45';
@@ -27,8 +27,8 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
 
   const checkInstallState = useCallback(async (pkgName: string) => {
     if (Platform.OS === 'windows') {
-      const installed = windowsInstalledApps.get(app.fileName) ?? false;
-      setInstallState(installed ? 'installed' : 'not_installed');
+      const installedPath = windowsInstalledApps.get(app.fileName);
+      setInstallState(installedPath ? 'installed' : 'not_installed');
       return;
     }
     if (!pkgName) {
@@ -73,8 +73,10 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
           });
           console.log('[Install] Download path:', parts.downloadPath);
           console.log('[Install] Install path: ', parts.installPath);
+          if (parts.installPath) {
+            windowsInstalledApps.set(app.fileName, parts.installPath);
+          }
         }
-        windowsInstalledApps.set(app.fileName, true);
         setInstallState('installed');
         return;
       }
@@ -89,10 +91,28 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
   };
 
   const handleLaunch = async () => {
+    if (Platform.OS === 'windows') {
+      const exePath = windowsInstalledApps.get(app.fileName);
+      console.log('[Launch] exePath:', exePath);
+      if (exePath) {
+        await AppUsageService.launchApp(exePath);
+      }
+      return;
+    }
     await AppUsageService.launchApp(packageName);
   };
 
   const handleUninstall = async () => {
+    if (Platform.OS === 'windows') {
+      try {
+        await AppUsageService.uninstallApp(app.fileName);
+        windowsInstalledApps.delete(app.fileName);
+      } catch (e) {
+        console.log('[Uninstall] failed to remove app files:', e);
+      }
+      checkInstallState(packageName);
+      return;
+    }
     await AppUsageService.uninstallApp(packageName);
     setTimeout(() => checkInstallState(packageName), 1000);
   };
