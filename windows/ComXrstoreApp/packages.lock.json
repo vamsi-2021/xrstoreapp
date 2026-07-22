@@ -151,16 +151,6 @@
           "Microsoft.WindowsAppSDK.Foundation": "1.8.260203002",
           "Microsoft.WindowsAppSDK.InteractiveExperiences": "1.8.260125001"
         }
-      },
-      "reactnativeasyncstorage": {
-        "type": "Project",
-        "dependencies": {
-          "Microsoft.ReactNative": "[0.84.0-preview.2, )",
-          "Microsoft.ReactNative.Cxx": "[0.84.0-preview.2, )",
-          "Microsoft.VCRTForwarders.140": "[1.0.2-rc, )",
-          "Microsoft.WindowsAppSDK": "[1.8.260209005, )",
-          "boost": "[1.83.0, )"
-        }
       }
     },
     "native,Version=v0.0/win": {
