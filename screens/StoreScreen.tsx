@@ -63,7 +63,7 @@ export default function StoreScreen({ onSelectApp, onBack }: Props) {
         renderItem={({ item: app }) => (
           <View style={styles.appItem}>
             <View style={styles.appThumbnail}>
-              <Image source={{ uri: app.logoURL }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+              <Image source={{ uri: app.logoURL }} style={styles.appThumbnailImage} resizeMode="cover" />
             </View>
             <View style={styles.appInfo}>
               <Text style={styles.appName}>{app.applicationName}</Text>
@@ -158,5 +158,9 @@ const styles = StyleSheet.create({
   launchButtonText: {
     color: TEXT_PRIMARY,
     fontSize: 15,
+  },
+  appThumbnailImage: {
+    width: '100%',
+    height: '100%',
   },
 });

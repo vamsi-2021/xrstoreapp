@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -42,6 +42,7 @@ export default function LoginScreen({ onLogin }: Props) {
   const [error, setError] = useState('');
   const [emailError, setEmailError] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  const passwordRef = useRef<TextInput>(null);
 
   const validateEmail = (value: string): boolean => {
     if (!value.trim()) {
@@ -101,7 +102,7 @@ export default function LoginScreen({ onLogin }: Props) {
         </View>
 
         <View style={styles.form}>
-          <Text style={styles.label}>Username:</Text>
+          <Text style={styles.label}>Email:</Text>
           <TextInput
             style={[styles.input, emailError ? styles.inputError : null]}
             placeholder="Enter your email"
@@ -111,17 +112,27 @@ export default function LoginScreen({ onLogin }: Props) {
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="email-address"
+            autoComplete="email"
+            textContentType="emailAddress"
+            returnKeyType="next"
+            onSubmitEditing={() => passwordRef.current?.focus()}
+            submitBehavior="submit"
           />
           {emailError ? <Text style={styles.fieldErrorText}>{emailError}</Text> : null}
 
           <Text style={styles.label}>Password:</Text>
           <TextInput
+            ref={passwordRef}
             style={[styles.input, passwordError ? styles.inputError : null]}
             placeholder="Enter your password (min. 8 characters)"
             placeholderTextColor="rgba(150,190,230,0.5)"
             value={password}
             onChangeText={(v) => { setPassword(v); if (passwordError) validatePassword(v); }}
             secureTextEntry
+            autoComplete="password"
+            textContentType="password"
+            returnKeyType="done"
+            onSubmitEditing={handleLogin}
           />
           {passwordError ? <Text style={styles.fieldErrorText}>{passwordError}</Text> : null}
 

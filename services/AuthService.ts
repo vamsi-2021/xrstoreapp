@@ -23,10 +23,32 @@ export type AuthUser = {
   roles: string[];
 };
 
+const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+function base64Decode(input: string): string {
+  const clean = input.replace(/[=]+$/, '');
+  let output = '';
+  let buffer = 0;
+  let bits = 0;
+  /* eslint-disable no-bitwise */
+  for (const char of clean) {
+    const value = BASE64_CHARS.indexOf(char);
+    if (value === -1) continue;
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      output += String.fromCharCode((buffer >> bits) & 0xff);
+    }
+  }
+  /* eslint-enable no-bitwise */
+  return output;
+}
+
 function parseJWT(token: string): JWTClaims | null {
   try {
     const payload = token.split('.')[1];
-    const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+    const decoded = base64Decode(payload.replace(/-/g, '+').replace(/_/g, '/'));
     return JSON.parse(decoded) as JWTClaims;
   } catch {
     return null;

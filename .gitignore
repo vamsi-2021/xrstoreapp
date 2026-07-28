@@ -47,6 +47,7 @@ windows/**/ARM64/
 windows/**/.vs/
 windows/**/MSBuild.ProcessorArchitecture.targets.log
 *.appx
+*.pfx
 *.appxbundle
 *.appxupload
 *.appxsym

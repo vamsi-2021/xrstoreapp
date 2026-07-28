@@ -108,14 +108,14 @@ export default function DashboardScreen({ user, onSelectApp, onOpenStore, onLogo
       <View style={styles.appsCard}>
         <Text style={styles.appsTitle}>My Applications</Text>
         {appsLoading && (
-          <ActivityIndicator size="large" color={TEXT_PRIMARY} style={{ marginVertical: 20 }} />
+          <ActivityIndicator size="large" color={TEXT_PRIMARY} style={styles.loadingIndicator} />
         )}
         <FlatList
           data={allApps}
           keyExtractor={(app) => app.fileName}
           showsVerticalScrollIndicator={false}
           nestedScrollEnabled
-          style={{ flex: 1 }}
+          style={styles.appsList}
           onLayout={() => console.log('[DashboardScreen] FlatList rendered, total items:', allApps.length)}
           renderItem={({ item: app, index }) => {
             console.log(`[DashboardScreen] Rendering item ${index}:`, app.applicationName);
@@ -123,7 +123,7 @@ export default function DashboardScreen({ user, onSelectApp, onOpenStore, onLogo
             <TouchableOpacity style={styles.appItem} onPress={() => onSelectApp(app)} activeOpacity={0.8}>
               {/* Thumbnail */}
               <View style={styles.appThumbnail}>
-                <Image source={{ uri: app.logoURL }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                <Image source={{ uri: app.logoURL }} style={styles.appThumbnailImage} resizeMode="cover" />
               </View>
 
               {/* Name + Time in App */}
@@ -249,5 +249,15 @@ const styles = StyleSheet.create({
     color: '#1a2d42',
     fontSize: 16,
     fontWeight: '400',
+  },
+  loadingIndicator: {
+    marginVertical: 20,
+  },
+  appsList: {
+    flex: 1,
+  },
+  appThumbnailImage: {
+    width: '100%',
+    height: '100%',
   },
 });

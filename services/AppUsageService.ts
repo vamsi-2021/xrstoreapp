@@ -29,9 +29,11 @@ const AppUsageService = {
     return AppUsageModule.getInstalledVersion(packageName);
   },
 
-  async launchApp(packageNameOrPath: string): Promise<void> {
+  async launchApp(packageNameOrPath: string, token?: string, email?: string): Promise<void> {
     if (isWindows && InstallModule) {
-      await InstallModule.launchApp(packageNameOrPath);
+      // Windows launches always forward the current user's token/email so the
+      // launched app can authenticate as them.
+      await InstallModule.launchApp(packageNameOrPath, token ?? '', email ?? '');
       return;
     }
     if (!isAvailable) return;

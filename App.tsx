@@ -46,6 +46,7 @@ export default function App() {
     return (
       <AppDetailScreen
         app={selectedApp}
+        userEmail={user?.email ?? ''}
         onBack={() => setScreen('dashboard')}
         onOpenStore={() => setScreen('store')}
       />
