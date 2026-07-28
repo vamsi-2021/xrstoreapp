@@ -61,6 +61,46 @@ const AuthService = {
     return { ...data, user };
   },
 
+  // Used for auto-login when the app is launched with -Token= (see
+  // StartupArgsService + App.tsx). Reuses the same NetworkService/JWT
+  // plumbing as login() instead of a separate code path: the token is set on
+  // NetworkService, then getUserInfo() is used purely to confirm the auth
+  // server still accepts it (throws on an invalid/expired token). The user
+  // object itself is decoded from the token's own claims, same as login().
+  async loginWithToken(token: string): Promise<{ user: AuthUser }> {
+    const previousAccessToken = NetworkService.getToken();
+    const previousRefreshToken = NetworkService.getRefreshToken();
+
+    NetworkService.setTokens(token, previousRefreshToken ?? '');
+
+    try {
+      await this.getUserInfo();
+    } catch (err) {
+      NetworkService.setTokens(previousAccessToken ?? '', previousRefreshToken ?? '');
+      if (!previousAccessToken) NetworkService.clearTokens();
+      throw err;
+    }
+
+    const claims = parseJWT(token);
+    if (!claims) {
+      NetworkService.setTokens(previousAccessToken ?? '', previousRefreshToken ?? '');
+      if (!previousAccessToken) NetworkService.clearTokens();
+      throw new Error('Startup token is malformed.');
+    }
+
+    const user: AuthUser = {
+      sub: claims.sub,
+      name: claims.name,
+      given_name: claims.given_name,
+      family_name: claims.family_name,
+      email: claims.email,
+      preferred_username: claims.preferred_username,
+      roles: claims.realm_access?.roles ?? [],
+    };
+
+    return { user };
+  },
+
   async logout(): Promise<void> {
     const refreshToken = NetworkService.getRefreshToken();
     try {
