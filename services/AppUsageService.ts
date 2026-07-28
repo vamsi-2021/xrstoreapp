@@ -67,6 +67,33 @@ const AppUsageService = {
     if (!isAvailable) return;
     return AppUsageModule.downloadAndInstall(zipUrl, fileName);
   },
+
+  async installLocalPackage(filePath: string, packageId: string): Promise<string> {
+    if (isWindows && InstallModule) {
+      return InstallModule.installLocalPackage(filePath, packageId);
+    }
+    return '';
+  },
+
+  async checkLocalInstall(packageId: string): Promise<string | null> {
+    if (isWindows && InstallModule) {
+      return InstallModule.checkLocalInstall(packageId);
+    }
+    return null;
+  },
+
+  async getInstallFolder(packageId: string): Promise<string> {
+    if (isWindows && InstallModule) {
+      return InstallModule.getInstallFolder(packageId);
+    }
+    return '';
+  },
+
+  async openFolder(path: string): Promise<void> {
+    if (isWindows && InstallModule) {
+      return InstallModule.openFolder(path);
+    }
+  },
 };
 
 export default AppUsageService;

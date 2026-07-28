@@ -22,10 +22,11 @@ type Props = {
   user: User;
   onSelectApp: (app: DashboardModel) => void;
   onOpenStore: () => void;
+  onOpenLocalLibrary: () => void;
   onLogout: () => void;
 };
 
-export default function DashboardScreen({ user, onSelectApp, onOpenStore, onLogout }: Props) {
+export default function DashboardScreen({ user, onSelectApp, onOpenStore, onOpenLocalLibrary, onLogout }: Props) {
   const [batteryLevel, setBatteryLevel] = useState<number | string | null>(null);
   const [allApps, setAllApps] = useState<DashboardModel[]>([]);
   const [appsLoading, setAppsLoading] = useState<boolean>(true);
@@ -88,9 +89,14 @@ export default function DashboardScreen({ user, onSelectApp, onOpenStore, onLogo
         <TouchableOpacity onPress={onOpenStore}>
           <Image source={XR_LOGO} style={styles.logoImage} resizeMode="contain" />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.backButton} onPress={handleLogout}>
-          <Text style={styles.backButtonText}>Logout</Text>
-        </TouchableOpacity>
+        <View style={styles.headerButtons}>
+          <TouchableOpacity style={styles.backButton} onPress={onOpenLocalLibrary}>
+            <Text style={styles.backButtonText}>My Library</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.backButton} onPress={handleLogout}>
+            <Text style={styles.backButtonText}>Logout</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* User Info Card */}
@@ -153,6 +159,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 16,
+  },
+  headerButtons: {
+    flexDirection: 'row',
+    gap: 10,
   },
   logoImage: {
     width: 120,

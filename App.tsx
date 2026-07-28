@@ -4,9 +4,10 @@ import LoginScreen from './screens/LoginScreen';
 import DashboardScreen from './screens/DashboardScreen';
 import AppDetailScreen from './screens/AppDetailScreen';
 import StoreScreen from './screens/StoreScreen';
+import LocalLibraryScreen from './screens/LocalLibraryScreen';
 import DashboardModel from './models/DashboardModel';
 
-type Screen = 'login' | 'dashboard' | 'store' | 'detail';
+type Screen = 'login' | 'dashboard' | 'store' | 'detail' | 'localLibrary';
 
 type User = {
   sub: string;
@@ -61,11 +62,16 @@ export default function App() {
     );
   }
 
+  if (screen === 'localLibrary') {
+    return <LocalLibraryScreen onBack={() => setScreen('dashboard')} />;
+  }
+
   return (
     <DashboardScreen
       user={user!}
       onSelectApp={handleSelectApp}
       onOpenStore={() => setScreen('store')}
+      onOpenLocalLibrary={() => setScreen('localLibrary')}
       onLogout={handleLogout}
     />
   );
