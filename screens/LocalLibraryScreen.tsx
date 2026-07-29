@@ -12,6 +12,8 @@ import {
 import { useLocalPackages } from '../hooks/useLocalPackages';
 import LocalPackageModel from '../models/LocalPackageModel';
 import AppUsageService from '../services/AppUsageService';
+import { formatDownloadLabel } from '../services/DownloadManager';
+import { useDownloadManager, useDownloadProgress } from '../contexts/DownloadContext';
 
 const XR_LOGO = require('../assets/xr-store-logo.png');
 
@@ -19,7 +21,9 @@ const BG = '#0d1b2a';
 const CARD = '#1c2e45';
 const TEXT_PRIMARY = '#cce0f5';
 
-type RowState = 'checking' | 'not_installed' | 'installing' | 'installed';
+const ACTIVE_DOWNLOAD_STATUSES = new Set(['downloading', 'extracting', 'launching']);
+
+type RowState = 'checking' | 'not_installed' | 'installed';
 
 type Props = {
   onBack: () => void;
@@ -32,8 +36,85 @@ function formatSize(bytes: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
+type RowProps = {
+  pkg: LocalPackageModel;
+  rowState: RowState;
+  onInstall: (pkg: LocalPackageModel) => void;
+  onLaunch: (pkg: LocalPackageModel) => void;
+  onOpenFolder: (pkg: LocalPackageModel) => void;
+  onUninstall: (pkg: LocalPackageModel) => void;
+  onInstallComplete: (pkg: LocalPackageModel, installPath?: string) => void;
+};
+
+// Per-row component (rather than inlining in FlatList's renderItem) so each
+// row can subscribe to its own package's progress via a hook - hooks can't be
+// called from a plain renderItem callback, which isn't a real component.
+function LibraryRow({ pkg, rowState, onInstall, onLaunch, onOpenFolder, onUninstall, onInstallComplete }: RowProps) {
+  const download = useDownloadProgress(pkg.id);
+
+  useEffect(() => {
+    if (download.status === 'completed') {
+      onInstallComplete(pkg, download.installPath);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [download.status, download.installPath]);
+
+  const isActive = ACTIVE_DOWNLOAD_STATUSES.has(download.status);
+
+  return (
+    <View style={styles.row}>
+      <View style={styles.rowInfo}>
+        <Text style={styles.rowName}>
+          {pkg.name}
+          {pkg.version ? ` (${pkg.version})` : ''}
+        </Text>
+        <Text style={styles.rowMeta}>{formatSize(pkg.sizeBytes)}</Text>
+        {!pkg.isValid && <Text style={styles.warnBadge}>⚠ {pkg.error ?? 'Invalid package'}</Text>}
+        {isActive && (
+          <View style={styles.progressBarTrack}>
+            <View style={[styles.progressBarFill, { width: `${Math.min(100, Math.max(0, download.percent))}%` }]} />
+          </View>
+        )}
+        {isActive && <Text style={styles.progressText}>{formatDownloadLabel(download)}</Text>}
+        {download.status === 'error' && <Text style={styles.warnBadge}>{download.error ?? 'Install failed'}</Text>}
+      </View>
+      {pkg.isValid && (
+        <View style={styles.buttonRow}>
+          {!isActive && download.status === 'error' && (
+            <TouchableOpacity style={styles.installButton} onPress={() => onInstall(pkg)}>
+              <Text style={styles.buttonText}>Retry</Text>
+            </TouchableOpacity>
+          )}
+          {!isActive && download.status !== 'error' && rowState === 'checking' && (
+            <ActivityIndicator color={TEXT_PRIMARY} />
+          )}
+          {!isActive && download.status !== 'error' && rowState === 'not_installed' && (
+            <TouchableOpacity style={styles.installButton} onPress={() => onInstall(pkg)}>
+              <Text style={styles.buttonText}>Install</Text>
+            </TouchableOpacity>
+          )}
+          {!isActive && download.status !== 'error' && rowState === 'installed' && (
+            <>
+              <TouchableOpacity style={styles.launchButton} onPress={() => onLaunch(pkg)}>
+                <Text style={styles.buttonText}>Launch</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.openButton} onPress={() => onOpenFolder(pkg)}>
+                <Text style={styles.buttonText}>Open</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.uninstallButton} onPress={() => onUninstall(pkg)}>
+                <Text style={styles.buttonText}>Uninstall</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
 export default function LocalLibraryScreen({ onBack }: Props) {
   const { packages, resolvedFolder, loading, error, rescan } = useLocalPackages();
+  const downloadManager = useDownloadManager();
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
   const [exePaths, setExePaths] = useState<Record<string, string>>({});
   const [installFolders, setInstallFolders] = useState<Record<string, string>>({});
@@ -69,18 +150,20 @@ export default function LocalLibraryScreen({ onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [packages]);
 
-  const handleInstall = async (pkg: LocalPackageModel) => {
-    setRowState((s) => ({ ...s, [pkg.id]: 'installing' }));
-    try {
-      const exePath = await AppUsageService.installLocalPackage(pkg.filePath, pkg.id);
-      setExePaths((s) => ({ ...s, [pkg.id]: exePath }));
-      setRowState((s) => ({ ...s, [pkg.id]: 'installed' }));
-      fetchInstallFolder(pkg.id);
-    } catch (e) {
-      console.log('[LocalLibrary] install failed:', e);
-      setRowState((s) => ({ ...s, [pkg.id]: 'not_installed' }));
-    }
+  const handleInstall = (pkg: LocalPackageModel) => {
+    // De-duped in DownloadManager itself too, but this keeps a rapid
+    // double-tap from even issuing a second native call.
+    if (ACTIVE_DOWNLOAD_STATUSES.has(downloadManager.getSnapshot(pkg.id).status)) return;
+    downloadManager.startLocalInstall(pkg.id, pkg.filePath);
   };
+
+  const handleInstallComplete = useCallback((pkg: LocalPackageModel, installPath?: string) => {
+    if (installPath) {
+      setExePaths((s) => ({ ...s, [pkg.id]: installPath }));
+    }
+    setRowState((s) => ({ ...s, [pkg.id]: 'installed' }));
+    fetchInstallFolder(pkg.id);
+  }, [fetchInstallFolder]);
 
   const handleLaunch = async (pkg: LocalPackageModel) => {
     const exePath = exePaths[pkg.id];
@@ -133,47 +216,17 @@ export default function LocalLibraryScreen({ onBack }: Props) {
           onRefresh={rescan}
           refreshing={false}
           showsVerticalScrollIndicator={false}
-          renderItem={({ item }) => {
-            const state = rowState[item.id] ?? 'checking';
-            return (
-              <View style={styles.row}>
-                <View style={styles.rowInfo}>
-                  <Text style={styles.rowName}>
-                    {item.name}
-                    {item.version ? ` (${item.version})` : ''}
-                  </Text>
-                  <Text style={styles.rowMeta}>{formatSize(item.sizeBytes)}</Text>
-                  {!item.isValid && (
-                    <Text style={styles.warnBadge}>⚠ {item.error ?? 'Invalid package'}</Text>
-                  )}
-                </View>
-                {item.isValid && (
-                  <View style={styles.buttonRow}>
-                    {state === 'checking' && <ActivityIndicator color={TEXT_PRIMARY} />}
-                    {state === 'not_installed' && (
-                      <TouchableOpacity style={styles.installButton} onPress={() => handleInstall(item)}>
-                        <Text style={styles.buttonText}>Install</Text>
-                      </TouchableOpacity>
-                    )}
-                    {state === 'installing' && <ActivityIndicator color={TEXT_PRIMARY} />}
-                    {state === 'installed' && (
-                      <>
-                        <TouchableOpacity style={styles.launchButton} onPress={() => handleLaunch(item)}>
-                          <Text style={styles.buttonText}>Launch</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.openButton} onPress={() => handleOpenFolder(item)}>
-                          <Text style={styles.buttonText}>Open</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.uninstallButton} onPress={() => handleUninstall(item)}>
-                          <Text style={styles.buttonText}>Uninstall</Text>
-                        </TouchableOpacity>
-                      </>
-                    )}
-                  </View>
-                )}
-              </View>
-            );
-          }}
+          renderItem={({ item }) => (
+            <LibraryRow
+              pkg={item}
+              rowState={rowState[item.id] ?? 'checking'}
+              onInstall={handleInstall}
+              onLaunch={handleLaunch}
+              onOpenFolder={handleOpenFolder}
+              onUninstall={handleUninstall}
+              onInstallComplete={handleInstallComplete}
+            />
+          )}
         />
       )}
     </View>
@@ -268,6 +321,26 @@ const styles = StyleSheet.create({
     color: '#e0b03a',
     fontSize: 12,
     marginTop: 2,
+  },
+  progressBarTrack: {
+    height: 14,
+    backgroundColor: '#1a2d42',
+    borderRadius: 7,
+    overflow: 'hidden',
+    marginTop: 6,
+  },
+  progressBarFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#2a6aad',
+    borderRadius: 7,
+  },
+  progressText: {
+    color: TEXT_PRIMARY,
+    fontSize: 11,
+    marginTop: 4,
   },
   buttonRow: {
     flexDirection: 'row',

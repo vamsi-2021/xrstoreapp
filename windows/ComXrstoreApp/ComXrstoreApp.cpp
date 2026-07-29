@@ -9,7 +9,7 @@
 
 #include <thread>
 #include <string>
-#include <urlmon.h>
+#include <wininet.h>
 #include <shlwapi.h>
 #include <shellapi.h>
 #include <winrt/Windows.Data.Json.h>
@@ -18,8 +18,11 @@
 #include <fstream>
 #include <optional>
 #include <vector>
+#include <mutex>
+#include <map>
+#include <cstdlib>
 
-#pragma comment(lib, "urlmon.lib")
+#pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "shlwapi.lib")
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
@@ -107,6 +110,41 @@ static void ParseFilenameMeta(const std::wstring& stem, std::wstring& outName, s
   }
 }
 
+// ─── Download progress state ─────────────────────────────────────────────────
+
+// Tracks progress for a single in-flight (or just-finished) download, keyed by
+// the caller-supplied id (JS passes the app's fileName). Shared across the
+// detached download threads and the getDownloadStatus/dedup checks in
+// installApp, so it must only ever be touched under g_downloadsMutex.
+struct DownloadState {
+  std::string status = "idle"; // downloading | extracting | launching | completed | error
+  unsigned long long bytesReceived = 0;
+  unsigned long long totalBytes = 0;
+  double percent = 0;
+  double speedBps = 0;
+  std::string error;
+  std::string downloadPath;
+  std::string installPath;
+};
+
+static std::mutex g_downloadsMutex;
+static std::map<std::string, DownloadState> g_downloads;
+
+static std::string BuildProgressJson(const std::string& id, const DownloadState& s) {
+  using namespace winrt::Windows::Data::Json;
+  JsonObject obj;
+  obj.SetNamedValue(L"id", JsonValue::CreateStringValue(AToW(id)));
+  obj.SetNamedValue(L"status", JsonValue::CreateStringValue(AToW(s.status)));
+  obj.SetNamedValue(L"bytesReceived", JsonValue::CreateNumberValue(static_cast<double>(s.bytesReceived)));
+  obj.SetNamedValue(L"totalBytes", JsonValue::CreateNumberValue(static_cast<double>(s.totalBytes)));
+  obj.SetNamedValue(L"percent", JsonValue::CreateNumberValue(s.percent));
+  obj.SetNamedValue(L"speedBps", JsonValue::CreateNumberValue(s.speedBps));
+  if (!s.error.empty()) obj.SetNamedValue(L"error", JsonValue::CreateStringValue(AToW(s.error)));
+  if (!s.downloadPath.empty()) obj.SetNamedValue(L"downloadPath", JsonValue::CreateStringValue(AToW(s.downloadPath)));
+  if (!s.installPath.empty()) obj.SetNamedValue(L"installPath", JsonValue::CreateStringValue(AToW(s.installPath)));
+  return WToA(std::wstring(obj.Stringify().c_str()));
+}
+
 // ─── InstallModule ───────────────────────────────────────────────────────────
 
 static std::wstring FindExeRecursive(const std::wstring& dir) {
@@ -150,36 +188,141 @@ static void DeleteDirRecursive(const std::wstring& dir) {
 
 REACT_MODULE(InstallModule)
 struct InstallModule {
+  // `id` is a caller-supplied unique key (JS passes the app's fileName) used to
+  // track progress and to reject duplicate concurrent calls for the same app.
   REACT_METHOD(installApp)
-  void installApp(std::string zipUrl, std::string fileName,
+  void installApp(std::string id, std::string zipUrl, std::string fileName,
     winrt::Microsoft::ReactNative::ReactPromise<std::string> promise) noexcept {
-    std::thread([=]() mutable {
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      auto it = g_downloads.find(id);
+      if (it != g_downloads.end() &&
+          (it->second.status == "downloading" || it->second.status == "extracting" || it->second.status == "launching")) {
+        promise.Reject(winrt::Microsoft::ReactNative::ReactError{"ALREADY_IN_PROGRESS", "Download already in progress for this id"});
+        return;
+      }
+      g_downloads[id] = DownloadState{};
+      g_downloads[id].status = "downloading";
+    }
+    EmitProgress(id);
+
+    std::thread([id, zipUrl, fileName, promise, this]() mutable {
       try {
         OutputDebugStringA(("[XRInstall] installApp called: " + zipUrl + "\n").c_str());
+        std::wstring sanitizedId = SanitizeId(AToW(id));
 
         wchar_t tempPath[MAX_PATH];
         GetTempPathW(MAX_PATH, tempPath);
         std::wstring wTempPath(tempPath);
-        std::wstring zipFilePath = wTempPath + L"xrstore_download.zip";
-        std::wstring extractDir  = wTempPath + L"xrstore_extract";
+        std::wstring zipFilePath = wTempPath + L"xrstore_" + sanitizedId + L".zip";
+        std::wstring extractDir  = wTempPath + L"xrstore_" + sanitizedId + L"_extract";
 
-        std::string zipFilePathA(zipFilePath.begin(), zipFilePath.end());
-        std::string extractDirA(extractDir.begin(), extractDir.end());
+        std::string zipFilePathA = WToA(zipFilePath);
+        std::string extractDirA = WToA(extractDir);
         OutputDebugStringA(("[XRInstall] Download destination: " + zipFilePathA + "\n").c_str());
         OutputDebugStringA(("[XRInstall] Extract destination:  " + extractDirA + "\n").c_str());
 
-        // Download ZIP
+        // Download ZIP via WinINet, chunked so we can report progress
         OutputDebugStringA("[XRInstall] Downloading ZIP...\n");
-        std::wstring wZipUrl(zipUrl.begin(), zipUrl.end());
-        HRESULT hr = URLDownloadToFileW(nullptr, wZipUrl.c_str(), zipFilePath.c_str(), 0, nullptr);
-        if (FAILED(hr)) {
-          OutputDebugStringA(("[XRInstall] Download failed hr=" + std::to_string(hr) + "\n").c_str());
+        std::wstring wZipUrl = AToW(zipUrl);
+
+        HINTERNET hSession = InternetOpenW(L"xrstoreapp", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+        if (!hSession) {
+          EmitError(id, "Failed to initialize network session");
+          promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Failed to initialize network session"});
+          return;
+        }
+        HINTERNET hUrl = InternetOpenUrlW(hSession, wZipUrl.c_str(), nullptr, 0,
+          INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_NO_UI, 0);
+        if (!hUrl) {
+          InternetCloseHandle(hSession);
+          EmitError(id, "Download failed to start");
+          promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Download failed to start"});
+          return;
+        }
+
+        unsigned long long totalBytes = 0;
+        {
+          wchar_t lenBuf[32] = {};
+          DWORD lenBufSize = sizeof(lenBuf);
+          DWORD headerIndex = 0;
+          if (HttpQueryInfoW(hUrl, HTTP_QUERY_CONTENT_LENGTH, lenBuf, &lenBufSize, &headerIndex)) {
+            totalBytes = _wtoi64(lenBuf);
+          }
+        }
+        {
+          std::lock_guard<std::mutex> lock(g_downloadsMutex);
+          g_downloads[id].totalBytes = totalBytes;
+        }
+
+        std::ofstream outFile(zipFilePath, std::ios::binary);
+        if (!outFile) {
+          InternetCloseHandle(hUrl);
+          InternetCloseHandle(hSession);
+          EmitError(id, "Failed to create download file");
+          promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Failed to create download file"});
+          return;
+        }
+
+        const DWORD bufferSize = 65536;
+        std::vector<char> buffer(bufferSize);
+        unsigned long long bytesReceived = 0;
+        auto lastEmit = std::chrono::steady_clock::now();
+        unsigned long long lastEmitBytes = 0;
+        bool downloadFailed = false;
+
+        while (true) {
+          DWORD bytesRead = 0;
+          if (!InternetReadFile(hUrl, buffer.data(), bufferSize, &bytesRead)) {
+            downloadFailed = true;
+            break;
+          }
+          if (bytesRead == 0) break; // EOF
+          outFile.write(buffer.data(), bytesRead);
+          bytesReceived += bytesRead;
+
+          auto now = std::chrono::steady_clock::now();
+          double elapsedSec = std::chrono::duration<double>(now - lastEmit).count();
+          if (elapsedSec >= 0.15) {
+            double speed = elapsedSec > 0 ? (bytesReceived - lastEmitBytes) / elapsedSec : 0;
+            {
+              std::lock_guard<std::mutex> lock(g_downloadsMutex);
+              auto& st = g_downloads[id];
+              st.bytesReceived = bytesReceived;
+              st.percent = totalBytes > 0 ? (100.0 * static_cast<double>(bytesReceived) / static_cast<double>(totalBytes)) : 0;
+              st.speedBps = speed;
+            }
+            EmitProgress(id);
+            lastEmit = now;
+            lastEmitBytes = bytesReceived;
+          }
+        }
+        outFile.close();
+        InternetCloseHandle(hUrl);
+        InternetCloseHandle(hSession);
+
+        if (downloadFailed) {
+          DeleteFileW(zipFilePath.c_str());
+          OutputDebugStringA("[XRInstall] Download failed\n");
+          EmitError(id, "Download failed");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Download failed"});
           return;
         }
         OutputDebugStringA(("[XRInstall] Download complete -> " + zipFilePathA + "\n").c_str());
 
+        {
+          std::lock_guard<std::mutex> lock(g_downloadsMutex);
+          auto& st = g_downloads[id];
+          st.bytesReceived = bytesReceived;
+          st.totalBytes = totalBytes > 0 ? totalBytes : bytesReceived;
+          st.percent = 100.0;
+          st.speedBps = 0;
+          st.downloadPath = zipFilePathA;
+        }
+        EmitProgress(id);
+
         // Extract via PowerShell
+        EmitStatus(id, "extracting");
         DeleteDirRecursive(extractDir);
         CreateDirectoryW(extractDir.c_str(), nullptr);
         OutputDebugStringA("[XRInstall] Extracting ZIP...\n");
@@ -197,6 +340,7 @@ struct InstallModule {
 
         if (!ShellExecuteExW(&sei) || !sei.hProcess) {
           OutputDebugStringA("[XRInstall] PowerShell launch failed\n");
+          EmitError(id, "Extraction failed");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Extraction failed"});
           return;
         }
@@ -209,11 +353,14 @@ struct InstallModule {
         std::wstring exePath = FindExeRecursive(extractDir);
         if (exePath.empty()) {
           OutputDebugStringA("[XRInstall] EXE not found in ZIP\n");
+          EmitError(id, "EXE not found in ZIP");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "EXE not found in ZIP"});
           return;
         }
-        std::string exePathA(exePath.begin(), exePath.end());
+        std::string exePathA = WToA(exePath);
         OutputDebugStringA(("[XRInstall] Launching: " + exePathA + "\n").c_str());
+
+        EmitStatus(id, "launching");
 
         SHELLEXECUTEINFOW runSei = {};
         runSei.cbSize = sizeof(runSei);
@@ -226,20 +373,69 @@ struct InstallModule {
 
         OutputDebugStringA(("[XRInstall] Installer launched: " + exePathA + "\n").c_str());
         OutputDebugStringA("[XRInstall] Install flow complete\n");
+
+        {
+          std::lock_guard<std::mutex> lock(g_downloadsMutex);
+          auto& st = g_downloads[id];
+          st.status = "completed";
+          st.installPath = exePathA;
+        }
+        EmitProgress(id);
+
         // Return paths so JS can log them
         std::string result = "downloadPath=" + zipFilePathA + ";installPath=" + exePathA;
         promise.Resolve(result);
       } catch (...) {
         OutputDebugStringA("[XRInstall] Exception in installApp\n");
+        EmitError(id, "Unknown error");
         promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Unknown error"});
       }
     }).detach();
   }
 
+  REACT_METHOD(getDownloadStatus)
+  void getDownloadStatus(std::string id,
+    winrt::Microsoft::ReactNative::ReactPromise<std::string> promise) noexcept {
+    std::lock_guard<std::mutex> lock(g_downloadsMutex);
+    auto it = g_downloads.find(id);
+    if (it == g_downloads.end()) {
+      promise.Resolve("");
+      return;
+    }
+    promise.Resolve(BuildProgressJson(id, it->second));
+  }
+
+  REACT_METHOD(addListener)
+  void addListener(std::string /*eventName*/) noexcept {}
+
+  REACT_METHOD(removeListeners)
+  void removeListeners(double /*count*/) noexcept {}
+
+  REACT_EVENT(onDownloadProgress);
+  std::function<void(std::string const&)> onDownloadProgress;
+
+  // Shares the same progress-event/dedup infrastructure as installApp, keyed
+  // by `packageId` this time. There's no network download here, so the state
+  // machine skips straight to "extracting" - and since the file is already
+  // fully present on disk, bytesReceived/totalBytes are reported as the file's
+  // full size up front so the shared progress UI reads sensibly.
   REACT_METHOD(installLocalPackage)
   void installLocalPackage(std::string filePath, std::string packageId,
     winrt::Microsoft::ReactNative::ReactPromise<std::string> promise) noexcept {
-    std::thread([=]() mutable {
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      auto it = g_downloads.find(packageId);
+      if (it != g_downloads.end() &&
+          (it->second.status == "downloading" || it->second.status == "extracting" || it->second.status == "launching")) {
+        promise.Reject(winrt::Microsoft::ReactNative::ReactError{"ALREADY_IN_PROGRESS", "Install already in progress for this package"});
+        return;
+      }
+      g_downloads[packageId] = DownloadState{};
+      g_downloads[packageId].status = "extracting";
+    }
+    EmitProgress(packageId);
+
+    std::thread([filePath, packageId, promise, this]() mutable {
       try {
         std::wstring wFilePath = AToW(filePath);
         std::wstring wPackageId = SanitizeId(AToW(packageId));
@@ -247,9 +443,21 @@ struct InstallModule {
 
         if (!IsValidZipSignature(wFilePath)) {
           OutputDebugStringA("[XRInstall] installLocalPackage: invalid zip signature\n");
+          EmitError(packageId, "Invalid or corrupted zip");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Invalid or corrupted zip"});
           return;
         }
+
+        WIN32_FILE_ATTRIBUTE_DATA fileInfo = {};
+        if (GetFileAttributesExW(wFilePath.c_str(), GetFileExInfoStandard, &fileInfo)) {
+          unsigned long long fileSize = (static_cast<unsigned long long>(fileInfo.nFileSizeHigh) << 32) | fileInfo.nFileSizeLow;
+          std::lock_guard<std::mutex> lock(g_downloadsMutex);
+          auto& st = g_downloads[packageId];
+          st.bytesReceived = fileSize;
+          st.totalBytes = fileSize;
+          st.percent = 100.0;
+        }
+        EmitProgress(packageId);
 
         std::wstring installDir = GetInstalledDirForPackage(wPackageId);
         DeleteDirRecursive(installDir);
@@ -267,6 +475,7 @@ struct InstallModule {
         sei.nShow  = SW_HIDE;
         if (!ShellExecuteExW(&sei) || !sei.hProcess) {
           OutputDebugStringA("[XRInstall] installLocalPackage: PowerShell launch failed\n");
+          EmitError(packageId, "Extraction failed");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Extraction failed"});
           return;
         }
@@ -276,13 +485,25 @@ struct InstallModule {
         std::wstring exePath = FindExeRecursive(installDir);
         if (exePath.empty()) {
           OutputDebugStringA("[XRInstall] installLocalPackage: EXE not found\n");
+          EmitError(packageId, "EXE not found in package");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "EXE not found in package"});
           return;
         }
-        OutputDebugStringA(("[XRInstall] installLocalPackage complete -> " + WToA(exePath) + "\n").c_str());
-        promise.Resolve(WToA(exePath));
+        std::string exePathA = WToA(exePath);
+        OutputDebugStringA(("[XRInstall] installLocalPackage complete -> " + exePathA + "\n").c_str());
+
+        {
+          std::lock_guard<std::mutex> lock(g_downloadsMutex);
+          auto& st = g_downloads[packageId];
+          st.status = "completed";
+          st.installPath = exePathA;
+        }
+        EmitProgress(packageId);
+
+        promise.Resolve(exePathA);
       } catch (...) {
         OutputDebugStringA("[XRInstall] Exception in installLocalPackage\n");
+        EmitError(packageId, "Unknown error");
         promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Unknown error"});
       }
     }).detach();
@@ -386,6 +607,36 @@ struct InstallModule {
     } catch (...) {
       promise.Reject(winrt::Microsoft::ReactNative::ReactError{"OPEN_ERROR", "Unknown error"});
     }
+  }
+
+ private:
+  void EmitProgress(const std::string& id) {
+    std::string json;
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      auto it = g_downloads.find(id);
+      if (it == g_downloads.end()) return;
+      json = BuildProgressJson(id, it->second);
+    }
+    if (onDownloadProgress) onDownloadProgress(json);
+  }
+
+  void EmitStatus(const std::string& id, const std::string& status) {
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      g_downloads[id].status = status;
+    }
+    EmitProgress(id);
+  }
+
+  void EmitError(const std::string& id, const std::string& message) {
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      auto& st = g_downloads[id];
+      st.status = "error";
+      st.error = message;
+    }
+    EmitProgress(id);
   }
 };
 

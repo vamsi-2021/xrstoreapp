@@ -2,11 +2,15 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Image, StatusBar, ActivityIndicator, Platform } from 'react-native';
 import DashboardModel from '../models/DashboardModel';
 import AppUsageService from '../services/AppUsageService';
+import { formatDownloadLabel } from '../services/DownloadManager';
+import { useDownloadManager, useDownloadProgress } from '../contexts/DownloadContext';
 
 const XR_LOGO = require('../assets/xr-store-logo.png');
 
 // Persists installed exe paths within the app session on Windows (no native API to query)
 const windowsInstalledApps = new Map<string, string>();
+
+const ACTIVE_DOWNLOAD_STATUSES = new Set(['downloading', 'extracting', 'launching']);
 
 const BG = '#0d1b2a';
 const CARD = '#1c2e45';
@@ -24,6 +28,19 @@ type Props = {
 export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
   const [installState, setInstallState] = useState<InstallState>('loading');
   const [packageName, setPackageName] = useState<string>('');
+  const downloadManager = useDownloadManager();
+  const download = useDownloadProgress(app.fileName);
+
+  // Download completion arrives asynchronously via the native event stream, so
+  // it may land well after handleInstall's own call returned (e.g. the screen
+  // was remounted mid-download and startDownload no-op'd into the existing one).
+  useEffect(() => {
+    if (Platform.OS !== 'windows' || download.status !== 'completed') return;
+    if (download.installPath) {
+      windowsInstalledApps.set(app.fileName, download.installPath);
+    }
+    setInstallState('installed');
+  }, [download.status, download.installPath, app.fileName]);
 
   const checkInstallState = useCallback(async (pkgName: string) => {
     if (Platform.OS === 'windows') {
@@ -55,6 +72,13 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
   }, [checkInstallState, packageName]);
 
   const handleInstall = async () => {
+    if (Platform.OS === 'windows') {
+      // DownloadManager de-dupes internally too, but bail out early here so a
+      // rapid double-tap never even issues a second call.
+      if (ACTIVE_DOWNLOAD_STATUSES.has(download.status)) return;
+      downloadManager.startDownload(app.fileName, app.zipURL, app.fileName);
+      return;
+    }
     console.log('[Install] Button tapped');
     console.log('[Install] zipURL:', app.zipURL);
     console.log('[Install] fileName:', app.fileName);
@@ -63,23 +87,6 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
       console.log('[Install] Starting download from:', app.zipURL);
       const resolvedPackageName = await AppUsageService.installApp(app.zipURL, app.fileName);
       console.log('[Install] Download & extraction complete');
-      if (Platform.OS === 'windows') {
-        // Parse paths returned from native module: "downloadPath=...;installPath=..."
-        if (resolvedPackageName) {
-          const parts: Record<string, string> = {};
-          resolvedPackageName.split(';').forEach(p => {
-            const idx = p.indexOf('=');
-            if (idx > 0) parts[p.slice(0, idx)] = p.slice(idx + 1);
-          });
-          console.log('[Install] Download path:', parts.downloadPath);
-          console.log('[Install] Install path: ', parts.installPath);
-          if (parts.installPath) {
-            windowsInstalledApps.set(app.fileName, parts.installPath);
-          }
-        }
-        setInstallState('installed');
-        return;
-      }
       if (resolvedPackageName) {
         setPackageName(resolvedPackageName);
       }
@@ -118,6 +125,28 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
   };
 
   const renderButtons = () => {
+    if (Platform.OS === 'windows' && ACTIVE_DOWNLOAD_STATUSES.has(download.status)) {
+      return (
+        <View style={styles.buttonCol}>
+          <View style={styles.progressBarTrack}>
+            <View style={[styles.progressBarFill, { width: `${Math.min(100, Math.max(0, download.percent))}%` }]} />
+          </View>
+          <Text style={styles.progressText}>{formatDownloadLabel(download)}</Text>
+        </View>
+      );
+    }
+    if (Platform.OS === 'windows' && download.status === 'error') {
+      return (
+        <View style={styles.buttonCol}>
+          <View style={styles.buttonRow}>
+            <TouchableOpacity style={styles.installButton} onPress={handleInstall}>
+              <Text style={styles.buttonText}>Retry Install</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.errorText}>{download.error ?? 'Install failed'}</Text>
+        </View>
+      );
+    }
     if (installState === 'loading') {
       return <ActivityIndicator color={TEXT_PRIMARY} style={{ marginBottom: 24 }} />;
     }
@@ -287,6 +316,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
     fontWeight: '500',
+  },
+  errorText: {
+    color: '#e07a6a',
+    fontSize: 12,
+    marginTop: 6,
   },
   buttonDisabled: {
     opacity: 0.5,
