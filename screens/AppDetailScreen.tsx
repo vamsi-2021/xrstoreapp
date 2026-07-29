@@ -10,7 +10,11 @@ const XR_LOGO = require('../assets/xr-store-logo.png');
 // Persists installed exe paths within the app session on Windows (no native API to query)
 const windowsInstalledApps = new Map<string, string>();
 
-const ACTIVE_DOWNLOAD_STATUSES = new Set(['downloading', 'extracting', 'launching']);
+// Statuses that replace the normal Install/Launch/Uninstall row with the
+// progress UI. Pause/Resume/Stop controls are only offered during the actual
+// 'downloading'/'paused' phases - extraction and launching are single blocking
+// native calls that can't be meaningfully paused or cancelled mid-way.
+const ACTIVE_DOWNLOAD_STATUSES = new Set(['downloading', 'extracting', 'launching', 'paused']);
 
 const BG = '#0d1b2a';
 const CARD = '#1c2e45';
@@ -97,6 +101,18 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
     }
   };
 
+  const handlePause = () => {
+    downloadManager.pauseDownload(app.fileName);
+  };
+
+  const handleResume = () => {
+    downloadManager.resumeDownload(app.fileName, app.zipURL, app.fileName);
+  };
+
+  const handleStop = () => {
+    downloadManager.cancelDownload(app.fileName);
+  };
+
   const handleLaunch = async () => {
     if (Platform.OS === 'windows') {
       const exePath = windowsInstalledApps.get(app.fileName);
@@ -126,12 +142,31 @@ export default function AppDetailScreen({ app, onBack, onOpenStore }: Props) {
 
   const renderButtons = () => {
     if (Platform.OS === 'windows' && ACTIVE_DOWNLOAD_STATUSES.has(download.status)) {
+      const isPaused = download.status === 'paused';
+      const isDownloading = download.status === 'downloading';
       return (
         <View style={styles.buttonCol}>
           <View style={styles.progressBarTrack}>
             <View style={[styles.progressBarFill, { width: `${Math.min(100, Math.max(0, download.percent))}%` }]} />
           </View>
           <Text style={styles.progressText}>{formatDownloadLabel(download)}</Text>
+          {(isDownloading || isPaused) && (
+            <View style={styles.buttonRow}>
+              {isDownloading && (
+                <TouchableOpacity style={styles.updateButton} onPress={handlePause}>
+                  <Text style={styles.buttonText}>Pause</Text>
+                </TouchableOpacity>
+              )}
+              {isPaused && (
+                <TouchableOpacity style={styles.installButton} onPress={handleResume}>
+                  <Text style={styles.buttonText}>Resume</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity style={styles.uninstallButton} onPress={handleStop}>
+                <Text style={styles.buttonText}>Stop</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       );
     }

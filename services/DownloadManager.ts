@@ -8,9 +8,19 @@ const isSupported = isWindows && InstallModule != null;
 const emitter = isSupported ? new NativeEventEmitter(InstallModule) : null;
 
 const STORAGE_KEY = 'xrstore.downloads.progress';
+// Blocks a duplicate Install/Resume call from being issued while one of these
+// is already in flight. Deliberately excludes 'paused' - a paused download
+// has no running thread, so calling startDownload again is exactly how it
+// resumes (installApp detects the paused state itself and continues via
+// HTTP Range instead of restarting).
 const ACTIVE_STATUSES = new Set(['downloading', 'extracting', 'launching']);
+// Used only when rehydrating from AsyncStorage: both of these mean "there was
+// a live native thread for this id at last write," which may no longer be
+// true if the process restarted - so both get reconciled against native
+// truth via getDownloadStatus rather than trusted blindly.
+const RECONCILE_STATUSES = new Set(['downloading', 'extracting', 'launching', 'paused']);
 
-export type DownloadStatus = 'idle' | 'downloading' | 'extracting' | 'launching' | 'completed' | 'error';
+export type DownloadStatus = 'idle' | 'downloading' | 'paused' | 'extracting' | 'launching' | 'completed' | 'error';
 
 export type DownloadState = {
   id: string;
@@ -49,8 +59,11 @@ export function formatBytes(bytes: number): string {
 // (My Library) so their progress rows read consistently.
 export function formatDownloadLabel(d: DownloadState): string {
   const pct = Math.round(d.percent);
-  const stage = d.status === 'extracting' ? 'Extracting' : d.status === 'launching' ? 'Launching' : 'Downloading';
   const size = d.totalBytes > 0 ? `${formatBytes(d.bytesReceived)} / ${formatBytes(d.totalBytes)}` : formatBytes(d.bytesReceived);
+  if (d.status === 'paused') {
+    return `Paused · ${pct}% · ${size}`;
+  }
+  const stage = d.status === 'extracting' ? 'Extracting' : d.status === 'launching' ? 'Launching' : 'Downloading';
   const speed = d.speedBps > 0 ? ` · ${formatBytes(d.speedBps)}/s` : '';
   return `${stage}… ${pct}% · ${size}${speed}`;
 }
@@ -114,7 +127,7 @@ class DownloadManagerImpl {
       const persisted: Record<string, DownloadState> = JSON.parse(raw);
       for (const id of Object.keys(persisted)) {
         const entry = persisted[id];
-        if (!ACTIVE_STATUSES.has(entry.status)) {
+        if (!RECONCILE_STATUSES.has(entry.status)) {
           this.states.set(id, entry);
           continue;
         }
@@ -163,12 +176,46 @@ class DownloadManagerImpl {
     if (current && ACTIVE_STATUSES.has(current.status)) {
       return; // already in flight for this id - de-dupe repeated Install clicks
     }
-    this.applyState(id, { status: 'downloading', percent: 0, bytesReceived: 0, totalBytes: 0, speedBps: 0, error: undefined }, { immediate: true });
+    // A paused download resumes via this same call (native detects the
+    // paused state and continues via Range) - keep its progress on screen
+    // instead of flashing back to 0% while the resume request is in flight.
+    const isResume = current?.status === 'paused' && current.bytesReceived > 0;
+    if (isResume) {
+      this.applyState(id, { status: 'downloading', speedBps: 0, error: undefined }, { immediate: true });
+    } else {
+      this.applyState(id, { status: 'downloading', percent: 0, bytesReceived: 0, totalBytes: 0, speedBps: 0, error: undefined }, { immediate: true });
+    }
     try {
       await InstallModule.installApp(id, zipUrl, fileName);
     } catch (e: any) {
-      if (e?.code === 'ALREADY_IN_PROGRESS') return; // native is already tracking it; events keep arriving
+      // ALREADY_IN_PROGRESS/PAUSED/CANCELLED are all native telling us the
+      // corresponding onDownloadProgress event already updated state - no
+      // separate error handling needed.
+      if (e?.code === 'ALREADY_IN_PROGRESS' || e?.code === 'PAUSED' || e?.code === 'CANCELLED') return;
       this.applyState(id, { status: 'error', error: e?.message ?? 'Install failed' }, { immediate: true });
+    }
+  }
+
+  async pauseDownload(id: string): Promise<void> {
+    if (!isSupported) return;
+    try {
+      await InstallModule.pauseDownload(id);
+    } catch {
+      // best-effort; native no-ops safely if there's nothing to pause
+    }
+  }
+
+  // Resuming is just re-issuing startDownload - see the isResume branch above.
+  resumeDownload(id: string, zipUrl: string, fileName: string): Promise<void> {
+    return this.startDownload(id, zipUrl, fileName);
+  }
+
+  async cancelDownload(id: string): Promise<void> {
+    if (!isSupported) return;
+    try {
+      await InstallModule.cancelDownload(id);
+    } catch {
+      // best-effort; native resets state on its own even without this resolving
     }
   }
 

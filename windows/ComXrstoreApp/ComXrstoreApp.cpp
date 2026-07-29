@@ -20,6 +20,7 @@
 #include <vector>
 #include <mutex>
 #include <map>
+#include <memory>
 #include <cstdlib>
 
 #pragma comment(lib, "wininet.lib")
@@ -117,7 +118,7 @@ static void ParseFilenameMeta(const std::wstring& stem, std::wstring& outName, s
 // detached download threads and the getDownloadStatus/dedup checks in
 // installApp, so it must only ever be touched under g_downloadsMutex.
 struct DownloadState {
-  std::string status = "idle"; // downloading | extracting | launching | completed | error
+  std::string status = "idle"; // downloading | paused | extracting | launching | completed | error
   unsigned long long bytesReceived = 0;
   unsigned long long totalBytes = 0;
   double percent = 0;
@@ -127,8 +128,31 @@ struct DownloadState {
   std::string installPath;
 };
 
+// Signals the running download thread from pauseDownload/cancelDownload. Kept
+// separate from DownloadState (rather than an atomic on the struct itself)
+// because the thread that owns a given control instance exits entirely on
+// pause - a fresh control is created if/when the download resumes.
+struct DownloadControl {
+  std::atomic<bool> pauseRequested{false};
+  std::atomic<bool> cancelRequested{false};
+};
+
 static std::mutex g_downloadsMutex;
 static std::map<std::string, DownloadState> g_downloads;
+static std::map<std::string, std::shared_ptr<DownloadControl>> g_controls;
+
+// Deterministic per-id temp paths so pause/resume (and a plain re-run of
+// installApp) always agree on where the partial file lives.
+static std::wstring GetDownloadZipPath(const std::string& id) {
+  wchar_t tempPath[MAX_PATH];
+  GetTempPathW(MAX_PATH, tempPath);
+  return std::wstring(tempPath) + L"xrstore_" + SanitizeId(AToW(id)) + L".zip";
+}
+static std::wstring GetDownloadExtractDir(const std::string& id) {
+  wchar_t tempPath[MAX_PATH];
+  GetTempPathW(MAX_PATH, tempPath);
+  return std::wstring(tempPath) + L"xrstore_" + SanitizeId(AToW(id)) + L"_extract";
+}
 
 static std::string BuildProgressJson(const std::string& id, const DownloadState& s) {
   using namespace winrt::Windows::Data::Json;
@@ -190,32 +214,45 @@ REACT_MODULE(InstallModule)
 struct InstallModule {
   // `id` is a caller-supplied unique key (JS passes the app's fileName) used to
   // track progress and to reject duplicate concurrent calls for the same app.
+  // If a previous call for this id was paused (see pauseDownload below), this
+  // call resumes it via an HTTP Range request instead of starting over.
   REACT_METHOD(installApp)
   void installApp(std::string id, std::string zipUrl, std::string fileName,
     winrt::Microsoft::ReactNative::ReactPromise<std::string> promise) noexcept {
+    unsigned long long resumeFromBytes = 0;
+    unsigned long long resumeTotalBytes = 0;
+    auto control = std::make_shared<DownloadControl>();
     {
       std::lock_guard<std::mutex> lock(g_downloadsMutex);
       auto it = g_downloads.find(id);
-      if (it != g_downloads.end() &&
-          (it->second.status == "downloading" || it->second.status == "extracting" || it->second.status == "launching")) {
-        promise.Reject(winrt::Microsoft::ReactNative::ReactError{"ALREADY_IN_PROGRESS", "Download already in progress for this id"});
-        return;
+      if (it != g_downloads.end()) {
+        if (it->second.status == "downloading" || it->second.status == "extracting" || it->second.status == "launching") {
+          promise.Reject(winrt::Microsoft::ReactNative::ReactError{"ALREADY_IN_PROGRESS", "Download already in progress for this id"});
+          return;
+        }
+        if (it->second.status == "paused" && it->second.bytesReceived > 0) {
+          resumeFromBytes = it->second.bytesReceived;
+          resumeTotalBytes = it->second.totalBytes;
+        }
       }
-      g_downloads[id] = DownloadState{};
-      g_downloads[id].status = "downloading";
+      DownloadState fresh;
+      fresh.status = "downloading";
+      if (resumeFromBytes > 0) {
+        fresh.bytesReceived = resumeFromBytes;
+        fresh.totalBytes = resumeTotalBytes;
+        fresh.percent = resumeTotalBytes > 0 ? (100.0 * static_cast<double>(resumeFromBytes) / static_cast<double>(resumeTotalBytes)) : 0;
+      }
+      g_downloads[id] = fresh;
+      g_controls[id] = control;
     }
     EmitProgress(id);
 
-    std::thread([id, zipUrl, fileName, promise, this]() mutable {
+    std::thread([id, zipUrl, fileName, promise, resumeFromBytes, resumeTotalBytes, control, this]() mutable {
       try {
         OutputDebugStringA(("[XRInstall] installApp called: " + zipUrl + "\n").c_str());
-        std::wstring sanitizedId = SanitizeId(AToW(id));
 
-        wchar_t tempPath[MAX_PATH];
-        GetTempPathW(MAX_PATH, tempPath);
-        std::wstring wTempPath(tempPath);
-        std::wstring zipFilePath = wTempPath + L"xrstore_" + sanitizedId + L".zip";
-        std::wstring extractDir  = wTempPath + L"xrstore_" + sanitizedId + L"_extract";
+        std::wstring zipFilePath = GetDownloadZipPath(id);
+        std::wstring extractDir  = GetDownloadExtractDir(id);
 
         std::string zipFilePathA = WToA(zipFilePath);
         std::string extractDirA = WToA(extractDir);
@@ -228,21 +265,43 @@ struct InstallModule {
 
         HINTERNET hSession = InternetOpenW(L"xrstoreapp", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
         if (!hSession) {
+          CleanupControl(id);
           EmitError(id, "Failed to initialize network session");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Failed to initialize network session"});
           return;
         }
-        HINTERNET hUrl = InternetOpenUrlW(hSession, wZipUrl.c_str(), nullptr, 0,
+
+        std::wstring rangeHeader;
+        if (resumeFromBytes > 0) {
+          rangeHeader = L"Range: bytes=" + std::to_wstring(resumeFromBytes) + L"-\r\n";
+        }
+        HINTERNET hUrl = InternetOpenUrlW(hSession, wZipUrl.c_str(),
+          rangeHeader.empty() ? nullptr : rangeHeader.c_str(),
+          rangeHeader.empty() ? 0 : static_cast<DWORD>(rangeHeader.size()),
           INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_NO_UI, 0);
         if (!hUrl) {
           InternetCloseHandle(hSession);
+          CleanupControl(id);
           EmitError(id, "Download failed to start");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Download failed to start"});
           return;
         }
 
-        unsigned long long totalBytes = 0;
-        {
+        // The server may not honor the Range request (common on plain static
+        // hosts) - detect that and fall back to a full restart rather than
+        // silently appending a duplicate full body onto the partial file.
+        bool isResume = false;
+        if (resumeFromBytes > 0) {
+          DWORD statusCode = 0;
+          DWORD statusSize = sizeof(statusCode);
+          DWORD idx = 0;
+          if (HttpQueryInfoW(hUrl, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &statusSize, &idx)) {
+            isResume = (statusCode == 206);
+          }
+        }
+
+        unsigned long long totalBytes = isResume ? resumeTotalBytes : 0;
+        if (!isResume) {
           wchar_t lenBuf[32] = {};
           DWORD lenBufSize = sizeof(lenBuf);
           DWORD headerIndex = 0;
@@ -252,13 +311,16 @@ struct InstallModule {
         }
         {
           std::lock_guard<std::mutex> lock(g_downloadsMutex);
-          g_downloads[id].totalBytes = totalBytes;
+          auto& st = g_downloads[id];
+          st.totalBytes = totalBytes;
+          if (!isResume) st.bytesReceived = 0;
         }
 
-        std::ofstream outFile(zipFilePath, std::ios::binary);
+        std::ofstream outFile(zipFilePath, isResume ? (std::ios::binary | std::ios::app) : std::ios::binary);
         if (!outFile) {
           InternetCloseHandle(hUrl);
           InternetCloseHandle(hSession);
+          CleanupControl(id);
           EmitError(id, "Failed to create download file");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Failed to create download file"});
           return;
@@ -266,12 +328,17 @@ struct InstallModule {
 
         const DWORD bufferSize = 65536;
         std::vector<char> buffer(bufferSize);
-        unsigned long long bytesReceived = 0;
+        unsigned long long bytesReceived = isResume ? resumeFromBytes : 0;
         auto lastEmit = std::chrono::steady_clock::now();
-        unsigned long long lastEmitBytes = 0;
+        unsigned long long lastEmitBytes = bytesReceived;
         bool downloadFailed = false;
+        bool paused = false;
+        bool cancelled = false;
 
         while (true) {
+          if (control->cancelRequested) { cancelled = true; break; }
+          if (control->pauseRequested) { paused = true; break; }
+
           DWORD bytesRead = 0;
           if (!InternetReadFile(hUrl, buffer.data(), bufferSize, &bytesRead)) {
             downloadFailed = true;
@@ -301,9 +368,32 @@ struct InstallModule {
         InternetCloseHandle(hUrl);
         InternetCloseHandle(hSession);
 
+        if (cancelled) {
+          DeleteFileW(zipFilePath.c_str());
+          OutputDebugStringA("[XRInstall] Download cancelled\n");
+          CleanupControl(id);
+          EmitReset(id);
+          promise.Reject(winrt::Microsoft::ReactNative::ReactError{"CANCELLED", "Download cancelled"});
+          return;
+        }
+        if (paused) {
+          OutputDebugStringA("[XRInstall] Download paused\n");
+          {
+            std::lock_guard<std::mutex> lock(g_downloadsMutex);
+            auto& st = g_downloads[id];
+            st.status = "paused";
+            st.bytesReceived = bytesReceived;
+            st.speedBps = 0;
+          }
+          EmitProgress(id);
+          CleanupControl(id);
+          promise.Reject(winrt::Microsoft::ReactNative::ReactError{"PAUSED", "Download paused"});
+          return;
+        }
         if (downloadFailed) {
           DeleteFileW(zipFilePath.c_str());
           OutputDebugStringA("[XRInstall] Download failed\n");
+          CleanupControl(id);
           EmitError(id, "Download failed");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Download failed"});
           return;
@@ -340,6 +430,7 @@ struct InstallModule {
 
         if (!ShellExecuteExW(&sei) || !sei.hProcess) {
           OutputDebugStringA("[XRInstall] PowerShell launch failed\n");
+          CleanupControl(id);
           EmitError(id, "Extraction failed");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Extraction failed"});
           return;
@@ -353,6 +444,7 @@ struct InstallModule {
         std::wstring exePath = FindExeRecursive(extractDir);
         if (exePath.empty()) {
           OutputDebugStringA("[XRInstall] EXE not found in ZIP\n");
+          CleanupControl(id);
           EmitError(id, "EXE not found in ZIP");
           promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "EXE not found in ZIP"});
           return;
@@ -380,6 +472,7 @@ struct InstallModule {
           st.status = "completed";
           st.installPath = exePathA;
         }
+        CleanupControl(id);
         EmitProgress(id);
 
         // Return paths so JS can log them
@@ -387,10 +480,49 @@ struct InstallModule {
         promise.Resolve(result);
       } catch (...) {
         OutputDebugStringA("[XRInstall] Exception in installApp\n");
+        CleanupControl(id);
         EmitError(id, "Unknown error");
         promise.Reject(winrt::Microsoft::ReactNative::ReactError{"INSTALL_ERROR", "Unknown error"});
       }
     }).detach();
+  }
+
+  REACT_METHOD(pauseDownload)
+  void pauseDownload(std::string id,
+    winrt::Microsoft::ReactNative::ReactPromise<void> promise) noexcept {
+    std::shared_ptr<DownloadControl> control;
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      auto it = g_controls.find(id);
+      if (it != g_controls.end()) control = it->second;
+    }
+    // If there's no live control, the download already finished/paused/failed
+    // on its own - nothing to do, and that's not an error from the caller's
+    // point of view.
+    if (control) control->pauseRequested = true;
+    promise.Resolve();
+  }
+
+  REACT_METHOD(cancelDownload)
+  void cancelDownload(std::string id,
+    winrt::Microsoft::ReactNative::ReactPromise<void> promise) noexcept {
+    std::shared_ptr<DownloadControl> control;
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      auto it = g_controls.find(id);
+      if (it != g_controls.end()) control = it->second;
+    }
+    if (control) {
+      // The running thread notices this and does the actual file cleanup +
+      // reset once it unwinds, from EmitReset/CleanupControl below.
+      control->cancelRequested = true;
+      promise.Resolve();
+      return;
+    }
+    // No live thread (e.g. already paused) - reset synchronously here instead.
+    DeleteFileW(GetDownloadZipPath(id).c_str());
+    EmitReset(id);
+    promise.Resolve();
   }
 
   REACT_METHOD(getDownloadStatus)
@@ -637,6 +769,22 @@ struct InstallModule {
       st.error = message;
     }
     EmitProgress(id);
+  }
+
+  // Used after a cancel: replaces the entry with a fresh "idle" state (rather
+  // than erasing it) so EmitProgress still finds something to emit - JS then
+  // sees status "idle" and shows the plain Install button again.
+  void EmitReset(const std::string& id) {
+    {
+      std::lock_guard<std::mutex> lock(g_downloadsMutex);
+      g_downloads[id] = DownloadState{};
+    }
+    EmitProgress(id);
+  }
+
+  void CleanupControl(const std::string& id) {
+    std::lock_guard<std::mutex> lock(g_downloadsMutex);
+    g_controls.erase(id);
   }
 };
 
