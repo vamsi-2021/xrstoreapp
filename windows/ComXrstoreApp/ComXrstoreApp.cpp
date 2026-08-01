@@ -35,6 +35,49 @@ static std::wstring AToW(const std::string& a) {
   return std::wstring(a.begin(), a.end());
 }
 
+// Proper UTF-8 -> UTF-16 conversion for values that may contain non-ASCII
+// characters (e.g. emails), where AToW's byte-truncating cast would corrupt
+// them.
+static std::wstring Utf8ToWide(const std::string& utf8) {
+  if (utf8.empty()) return std::wstring();
+  int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), nullptr, 0);
+  std::wstring result(size, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), result.data(), size);
+  return result;
+}
+
+// Quotes a single command-line argument value per the rules CommandLineToArgvW
+// uses to parse it back (backslashes only need escaping immediately before a
+// quote or at the very end of a quoted run). Values with no whitespace or
+// quote characters are left bare. Used to build the -Token=/-Email= value
+// forwarded to launched XR Store apps - see InstallModule::launchApp below
+// and StartupArgsModule's ParseStartupArguments, which reads it back.
+static std::wstring QuoteArg(const std::wstring& value) {
+  if (!value.empty() && value.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
+    return value;
+  }
+  std::wstring result = L"\"";
+  for (auto it = value.begin(); ; ++it) {
+    size_t backslashes = 0;
+    while (it != value.end() && *it == L'\\') {
+      ++it;
+      ++backslashes;
+    }
+    if (it == value.end()) {
+      result.append(backslashes * 2, L'\\');
+      break;
+    } else if (*it == L'"') {
+      result.append(backslashes * 2 + 1, L'\\');
+      result.push_back(*it);
+    } else {
+      result.append(backslashes, L'\\');
+      result.push_back(*it);
+    }
+  }
+  result.push_back(L'"');
+  return result;
+}
+
 static std::wstring GetLocalAppDataDir() {
   wchar_t* buf = nullptr;
   size_t len = 0;
@@ -192,22 +235,32 @@ static std::wstring FindExeRecursive(const std::wstring& dir) {
   return L"";
 }
 
-static void DeleteDirRecursive(const std::wstring& dir) {
+// Returns false if anything under `dir` (including `dir` itself) could not be
+// removed - e.g. a file left read-only by the extracted package, or an exe
+// still locked because the app is running. Callers that only use this to
+// clear space before a fresh install can ignore the result; uninstallApp
+// surfaces it so the UI doesn't report success when files are still on disk.
+static bool DeleteDirRecursive(const std::wstring& dir) {
   WIN32_FIND_DATAW fd;
   HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-  if (h == INVALID_HANDLE_VALUE) return;
+  if (h == INVALID_HANDLE_VALUE) return true;
+  bool allDeleted = true;
   do {
     if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
     std::wstring path = dir + L"\\" + fd.cFileName;
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-      DeleteDirRecursive(path);
-      RemoveDirectoryW(path.c_str());
+      if (!DeleteDirRecursive(path)) allDeleted = false;
+      if (!RemoveDirectoryW(path.c_str())) allDeleted = false;
     } else {
-      DeleteFileW(path.c_str());
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY) {
+        SetFileAttributesW(path.c_str(), fd.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
+      }
+      if (!DeleteFileW(path.c_str())) allDeleted = false;
     }
   } while (FindNextFileW(h, &fd));
   FindClose(h);
-  RemoveDirectoryW(dir.c_str());
+  if (!RemoveDirectoryW(dir.c_str())) allDeleted = false;
+  return allDeleted;
 }
 
 REACT_MODULE(InstallModule)
@@ -641,16 +694,32 @@ struct InstallModule {
     }).detach();
   }
 
+  // token/email are the current xrstoreapp session's credentials (see
+  // AppUsageService.launchApp on the JS side); when present they're forwarded
+  // as -Token=/-Email= so the launched app can auto-login instead of showing
+  // its own login screen (see StartupArgsModule::getStartupArguments, and
+  // this app's own App.tsx which does the same thing on its own startup).
   REACT_METHOD(launchApp)
-  void launchApp(std::string exePath,
+  void launchApp(std::string exePath, std::string token, std::string email,
     winrt::Microsoft::ReactNative::ReactPromise<void> promise) noexcept {
     try {
       std::wstring wExePath = AToW(exePath);
+
+      std::wstring parameters;
+      if (!token.empty()) {
+        parameters += L"-Token=" + QuoteArg(Utf8ToWide(token));
+      }
+      if (!email.empty()) {
+        if (!parameters.empty()) parameters += L" ";
+        parameters += L"-Email=" + QuoteArg(Utf8ToWide(email));
+      }
+
       SHELLEXECUTEINFOW sei = {};
       sei.cbSize = sizeof(sei);
       sei.fMask  = SEE_MASK_NOCLOSEPROCESS;
       sei.lpVerb = L"open";
       sei.lpFile = wExePath.c_str();
+      sei.lpParameters = parameters.empty() ? nullptr : parameters.c_str();
       sei.nShow  = SW_SHOW;
       if (!ShellExecuteExW(&sei)) {
         promise.Reject(winrt::Microsoft::ReactNative::ReactError{"LAUNCH_ERROR", "Failed to launch"});
@@ -680,7 +749,12 @@ struct InstallModule {
           dirToDelete = (pos != std::wstring::npos) ? wPath.substr(0, pos) : wPath;
         }
       }
-      DeleteDirRecursive(dirToDelete);
+      if (!DeleteDirRecursive(dirToDelete)) {
+        OutputDebugStringA("[XRInstall] uninstallApp: some files could not be removed (in use or read-only)\n");
+        promise.Reject(winrt::Microsoft::ReactNative::ReactError{
+          "UNINSTALL_ERROR", "Could not fully remove the app. Make sure it isn't still running, then try again."});
+        return;
+      }
       promise.Resolve();
     } catch (...) {
       promise.Reject(winrt::Microsoft::ReactNative::ReactError{"UNINSTALL_ERROR", "Unknown error"});
@@ -977,6 +1051,103 @@ struct PackageWatcherModule {
   std::thread m_thread;
   HANDLE m_stopEvent = nullptr;
   std::atomic<bool> m_running{false};
+};
+
+// ─── StartupArgsModule ───────────────────────────────────────────────────────
+//
+// Exposes the -Token=/-Email= command-line arguments this app may have been
+// launched with (see QuoteArg + InstallModule::launchApp above, and its JS
+// counterpart AppUsageService.launchApp) so the JS side can auto-login
+// instead of showing the manual login screen. See App.tsx for the JS flow.
+
+// Converts a UTF-16 Windows string to UTF-8. Written explicitly (rather than
+// the byte-truncating std::string(begin, end) cast used elsewhere in this
+// file) because emails can contain non-ASCII characters that must survive
+// the trip to JS intact.
+static std::string WideToUtf8(const std::wstring& wide) {
+  if (wide.empty()) return std::string();
+  int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(), nullptr, 0, nullptr, nullptr);
+  std::string result(size, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(), result.data(), size, nullptr, nullptr);
+  return result;
+}
+
+// Strips one layer of matching double quotes, e.g. from -Email="a@b.com".
+// CommandLineToArgvW already un-quotes whole arguments, but a value quoted
+// only on the right-hand side of -Token=/-Email= (as QuoteArg above produces)
+// stays part of the same argv entry, so this handles that inner layer.
+static std::wstring StripQuotes(std::wstring value) {
+  if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"') {
+    return value.substr(1, value.size() - 2);
+  }
+  return value;
+}
+
+struct StartupArgumentsRaw {
+  std::wstring token;
+  std::wstring email;
+};
+
+// Parses -Token=/-Email= out of the process command line. Reads
+// GetCommandLineW() directly instead of caching WinMain's argument, since the
+// command line stays valid for the lifetime of the process and this only
+// needs to run the first time JS asks for it. Missing or malformed arguments
+// simply leave the corresponding field empty rather than failing.
+static StartupArgumentsRaw ParseStartupArguments() noexcept {
+  StartupArgumentsRaw result;
+  int argc = 0;
+  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (argv == nullptr) return result;
+
+  for (int i = 1; i < argc; i++) {
+    std::wstring arg(argv[i]);
+    auto matchArg = [&](const wchar_t* prefix, std::wstring& target) {
+      size_t prefixLen = wcslen(prefix);
+      if (arg.size() > prefixLen && _wcsnicmp(arg.c_str(), prefix, prefixLen) == 0) {
+        target = StripQuotes(arg.substr(prefixLen));
+      }
+    };
+    matchArg(L"-Token=", result.token);
+    matchArg(L"-Email=", result.email);
+  }
+
+  LocalFree(argv);
+  return result;
+}
+
+// REACT_STRUCT gives JS a plain { token, email } object without hand-rolling
+// JSValue construction.
+REACT_STRUCT(StartupArgumentsResult)
+struct StartupArgumentsResult {
+  REACT_FIELD(token)
+  std::string token;
+
+  REACT_FIELD(email)
+  std::string email;
+};
+
+REACT_MODULE(StartupArgsModule)
+struct StartupArgsModule {
+  // Resolves with { token: "", email: "" } when the app was launched normally
+  // (no -Token=/-Email=), so JS only needs to check `token` for truthiness -
+  // it never needs to handle a rejected promise for the "no args" case.
+  REACT_METHOD(getStartupArguments)
+  void getStartupArguments(winrt::Microsoft::ReactNative::ReactPromise<StartupArgumentsResult> promise) noexcept {
+    try {
+      StartupArgumentsRaw args = ParseStartupArguments();
+      StartupArgumentsResult result;
+      result.token = WideToUtf8(args.token);
+      result.email = WideToUtf8(args.email);
+      // Deliberately not logging the token itself - only whether one was present.
+      OutputDebugStringA(result.token.empty()
+        ? "[StartupArgsModule] No startup token present\n"
+        : "[StartupArgsModule] Startup token present\n");
+      promise.Resolve(result);
+    } catch (...) {
+      OutputDebugStringA("[StartupArgsModule] Exception while parsing startup arguments\n");
+      promise.Reject(winrt::Microsoft::ReactNative::ReactError{"STARTUP_ARGS_ERROR", "Failed to read startup arguments"});
+    }
+  }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

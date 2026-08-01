@@ -8,6 +8,7 @@ import {
   Image,
   StatusBar,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useLocalPackages } from '../hooks/useLocalPackages';
 import LocalPackageModel from '../models/LocalPackageModel';
@@ -180,6 +181,11 @@ export default function LocalLibraryScreen({ onBack }: Props) {
       await AppUsageService.uninstallApp(pkg.id);
     } catch (e) {
       console.log('[LocalLibrary] uninstall failed:', e);
+      Alert.alert(
+        'Uninstall failed',
+        'Could not fully remove the app. Make sure it isn\'t still running, then try again.',
+      );
+      return;
     }
     setRowState((s) => ({ ...s, [pkg.id]: 'not_installed' }));
     setExePaths((s) => { const next = { ...s }; delete next[pkg.id]; return next; });

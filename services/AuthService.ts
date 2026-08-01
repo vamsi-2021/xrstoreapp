@@ -33,6 +33,12 @@ function parseJWT(token: string): JWTClaims | null {
   }
 }
 
+// Mirrors NetworkService's in-memory token storage: the last user resolved by
+// login()/loginWithToken(), so callers elsewhere (e.g. AppUsageService,
+// forwarding credentials to a launched app) can read the current session's
+// email without App.tsx having to thread it through as a prop.
+let currentUser: AuthUser | null = null;
+
 const AuthService = {
   async login(username: string, password: string): Promise<{ user: AuthUser }> {
     const data = await NetworkService.postForm('/token', {
@@ -58,6 +64,7 @@ const AuthService = {
         }
       : { sub: '', name: '', email: '', preferred_username: '', roles: [] };
 
+    currentUser = user;
     return { ...data, user };
   },
 
@@ -98,6 +105,7 @@ const AuthService = {
       roles: claims.realm_access?.roles ?? [],
     };
 
+    currentUser = user;
     return { user };
   },
 
@@ -112,11 +120,18 @@ const AuthService = {
       }
     } finally {
       NetworkService.clearTokens();
+      currentUser = null;
     }
   },
 
   getUserInfo(): Promise<any> {
     return NetworkService.get('/userinfo');
+  },
+
+  // The signed-in user's claims, decoded at login/loginWithToken time. Null
+  // if nobody's logged in yet (or logout() has cleared the session).
+  getCurrentUser(): AuthUser | null {
+    return currentUser;
   },
 };
 

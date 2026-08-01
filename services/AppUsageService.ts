@@ -1,4 +1,6 @@
 import { NativeModules, Platform } from 'react-native';
+import AuthService from './AuthService';
+import NetworkService from './NetworkService';
 
 const { AppUsageModule, InstallModule } = NativeModules;
 
@@ -29,9 +31,14 @@ const AppUsageService = {
     return AppUsageModule.getInstalledVersion(packageName);
   },
 
+  // Forwards this app's own session credentials to the launched app so it can
+  // auto-login instead of showing its own login screen - see StartupArgsService
+  // + App.tsx for the JS side that reads them back on startup.
   async launchApp(packageNameOrPath: string): Promise<void> {
     if (isWindows && InstallModule) {
-      await InstallModule.launchApp(packageNameOrPath);
+      const token = NetworkService.getToken() ?? '';
+      const email = AuthService.getCurrentUser()?.email ?? '';
+      await InstallModule.launchApp(packageNameOrPath, token, email);
       return;
     }
     if (!isAvailable) return;
