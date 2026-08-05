@@ -7,6 +7,7 @@ import StoreScreen from './screens/StoreScreen';
 import LocalLibraryScreen from './screens/LocalLibraryScreen';
 import DashboardModel from './models/DashboardModel';
 import AuthService from './services/AuthService';
+import ConfigService from './services/ConfigService';
 import StartupArgsService from './services/StartupArgsService';
 import SecureStorage from './services/SecureStorage';
 
@@ -36,10 +37,22 @@ export default function App() {
   // screen. Any failure here (missing args, invalid/expired token, no native
   // module on this platform) is swallowed and treated the same as "no
   // token" so the app can never get stuck on the bootstrapping screen.
+  //
+  // ConfigService.initialize() loads config.json (creating it with empty
+  // defaults on first run) before anything Keycloak-related runs. If the
+  // config turns out incomplete, auto-login is skipped in favor of the
+  // manual login screen, which is where the user is prompted to fix it.
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
+      await ConfigService.initialize();
+
+      if (!ConfigService.isConfigured()) {
+        if (!cancelled) setScreen('login');
+        return;
+      }
+
       const { token } = await StartupArgsService.getStartupArguments();
 
       if (token) {

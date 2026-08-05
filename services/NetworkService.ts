@@ -1,5 +1,11 @@
-const BASE_URL =
-  'https://keycloak.betaflixinc.com/realms/BetaFlix-Experiments/protocol/openid-connect';
+import ConfigService from './ConfigService';
+
+// Computed per-call rather than cached at module load: ConfigService.initialize()
+// runs asynchronously during app startup, after this module is first imported,
+// so a module-level constant would capture empty values.
+function getBaseUrl(): string {
+  return `${ConfigService.KEYCLOAK_URL}/realms/${ConfigService.KEYCLOAK_REALM}/protocol/openid-connect`;
+}
 
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
@@ -35,7 +41,7 @@ const NetworkService = {
     body: object | null = null,
     requiresAuth: boolean = true,
   ): Promise<any> {
-    const url = `${BASE_URL}${endpoint}`;
+    const url = `${getBaseUrl()}${endpoint}`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -58,7 +64,7 @@ const NetworkService = {
   // ─── Form-Encoded Request ─────────────────────────────────────────────────────
 
   async postForm(endpoint: string, params: Record<string, string>): Promise<any> {
-    const url = `${BASE_URL}${endpoint}`;
+    const url = `${getBaseUrl()}${endpoint}`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/x-www-form-urlencoded',

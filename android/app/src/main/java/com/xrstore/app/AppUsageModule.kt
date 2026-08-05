@@ -211,6 +211,33 @@ class AppUsageModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Reveals a directory (e.g. the config.json folder, see ConfigService)
+     * in whatever app the device offers for "resource/folder" - typically
+     * a file manager. Not every device has one registered for this MIME
+     * type, so callers should treat a rejection as non-fatal.
+     */
+    @ReactMethod
+    fun openFolder(path: String, promise: Promise) {
+        try {
+            val dir = File(path)
+            val uri = FileProvider.getUriForFile(
+                reactApplicationContext,
+                "${reactApplicationContext.packageName}.provider",
+                dir
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "resource/folder")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            reactApplicationContext.startActivity(intent)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("OPEN_FOLDER_ERROR", e.message ?: "No app available to open this folder")
+        }
+    }
+
+    /**
      * Opens the system uninstall dialog for the given package name.
      */
     @ReactMethod

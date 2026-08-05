@@ -1,7 +1,17 @@
+import ConfigService from './ConfigService';
 import NetworkService from './NetworkService';
 
-const CLIENT_ID = 'user_client';
 const SCOPE = 'lrs:statements/write openid profile email lrs:statements/read/mine';
+
+// Logged immediately before every Keycloak request so a failed login/logout
+// can be traced back to which config values (from config.json) were in use.
+function logKeycloakConfig(): void {
+  console.log('[AuthService] Initializing Keycloak', {
+    url: ConfigService.KEYCLOAK_URL,
+    realm: ConfigService.KEYCLOAK_REALM,
+    clientId: ConfigService.KEYCLOAK_CLIENT_ID,
+  });
+}
 
 type JWTClaims = {
   sub: string;
@@ -41,8 +51,10 @@ let currentUser: AuthUser | null = null;
 
 const AuthService = {
   async login(username: string, password: string): Promise<{ user: AuthUser }> {
+    logKeycloakConfig();
+
     const data = await NetworkService.postForm('/token', {
-      client_id: CLIENT_ID,
+      client_id: ConfigService.KEYCLOAK_CLIENT_ID,
       username,
       password,
       grant_type: 'password',
@@ -75,6 +87,8 @@ const AuthService = {
   // server still accepts it (throws on an invalid/expired token). The user
   // object itself is decoded from the token's own claims, same as login().
   async loginWithToken(token: string): Promise<{ user: AuthUser }> {
+    logKeycloakConfig();
+
     const previousAccessToken = NetworkService.getToken();
     const previousRefreshToken = NetworkService.getRefreshToken();
 
@@ -114,7 +128,7 @@ const AuthService = {
     try {
       if (refreshToken) {
         await NetworkService.postForm('/logout', {
-          client_id: CLIENT_ID,
+          client_id: ConfigService.KEYCLOAK_CLIENT_ID,
           refresh_token: refreshToken,
         });
       }

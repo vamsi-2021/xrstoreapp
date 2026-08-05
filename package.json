@@ -12,6 +12,7 @@
     "test:windows": "jest --config jest.config.windows.js"
   },
   "dependencies": {
+    "@dr.pogodin/react-native-fs": "^2.39.2",
     "@react-native-async-storage/async-storage": "^3.0.2",
     "@react-native/new-app-screen": "0.84.1",
     "react": "19.2.3",

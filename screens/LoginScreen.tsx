@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  Alert,
   View,
   Text,
   TextInput,
@@ -12,6 +13,7 @@ import {
   StatusBar,
 } from 'react-native';
 import AuthService from '../services/AuthService';
+import ConfigService from '../services/ConfigService';
 
 const BG = '#0d1b2a';
 const INPUT_BG = 'rgba(10, 30, 55, 0.8)';
@@ -73,6 +75,19 @@ export default function LoginScreen({ onLogin }: Props) {
     const isEmailValid = validateEmail(username);
     const isPasswordValid = validatePassword(password);
     if (!isEmailValid || !isPasswordValid) return;
+
+    if (!ConfigService.isConfigured()) {
+      Alert.alert(
+        'Configuration Required',
+        'The Keycloak configuration is missing or incomplete. Please update config.json before attempting to log in.',
+        [
+          { text: 'OK', style: 'cancel' },
+          { text: 'Open Config Location', onPress: () => { ConfigService.openConfigLocation(); } },
+        ],
+      );
+      return;
+    }
+
     setError('');
     setLoading(true);
     try {
